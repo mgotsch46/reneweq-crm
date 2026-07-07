@@ -1,0 +1,690 @@
+/**
+ * routes/contacts.js — contacts, per-contact activities, and messaging actions.
+ * All routes here run behind requireAuth (mounted in server.js).
+ *
+ * TENANT ISOLATION: every query below scopes by owner via ownerScope()/
+ * canTouch() from ./helpers — non-admins only ever see or mutate their own
+ * rows. See routes/helpers.js for the boundary definition.
+ */
+'use strict';
+
+const express = require('express');
+const { db, uid, now, STAGES, DEFAULT_TEXTS, DEFAULT_RVM } = require('../db');
+const { sendSms, sendRvm } = require('../integrations');
+const { isAdmin, ownerScope, canTouch, renderTemplate, parseContact } = require('./helpers');
+
+const router = express.Router();
+
+/** Fields a client may set on a contact (owner_id deliberately excluded for non-admins). */
+const CONTACT_FIELDS = [
+  'name', 'email', 'phone', 'property', 'zillow',
+  'agentName', 'agentPhone', 'agentEmail', 'stage', 'notes',
+  'executedContract', 'closing', 'dueDiligence', 'inspectionExpires',
+  'source', 'dnc', 'consent_sms', 'consent_rvm', 'texts', 'textStatus',
+  'rvm', 'rvmStatus',
+  // Real-estate lead fields
+  'beds', 'baths', 'sqft', 'agentCompany', 'isFsbo', 'sellerName',
+  'fsboPhone', 'fsboEmail', 'daysOnMarket', 'priceChanges', 'propertyTax',
+  'photoUrl', 'sourceUrl', 'keywords', 'city', 'state', 'listingDescription',
+  // Lead Engine fields
+  'zip', 'price', 'zpid', 'listingDate', 'grade', 'importDate', 'dateFound',
+  'propertyType', 'lead_status', 'status_locked',
+];
+
+/** Lead Engine triage statuses. */
+const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING'];
+
+const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price'];
+const BOOL_FIELDS = ['dnc', 'consent_sms', 'consent_rvm', 'rvmStatus', 'isFsbo', 'status_locked'];
+
+/** Coerce loose client input to a number or null (node:sqlite rejects '' / NaN). */
+function toNum(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Coerce loose client input to 0/1 (node:sqlite rejects JS booleans). */
+function toBit(v) {
+  return v === true || v === 1 || v === '1' || v === 'true' ? 1 : 0;
+}
+
+/** Load a contact ONLY if the requester is allowed to touch it (else null). */
+function getOwnedContact(id, user) {
+  const row = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
+  return canTouch(user, row) ? row : null; // isolation check
+}
+
+function logActivity({ contact, user, type, mode, direction, body, status, provider_id }) {
+  const act = {
+    id: uid(),
+    contact_id: contact.id,
+    owner_id: contact.owner_id,
+    type,
+    mode: mode || 'manual',
+    direction: direction || 'outbound',
+    body: body || null,
+    status: status || null,
+    provider_id: provider_id || null,
+    created_by: user.id,
+    created_at: now(),
+  };
+  db.prepare(`
+    INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, provider_id, created_by, created_at)
+    VALUES (@id, @contact_id, @owner_id, @type, @mode, @direction, @body, @status, @provider_id, @created_by, @created_at)
+  `).run(act);
+  return act;
+}
+
+/**
+ * A call went out to this contact (logged call, manual call path, or RVM
+ * drop): set called=1 and move Lead Engine leads out of the NEW / IN QUEUE
+ * triage state into WORKING.
+ */
+function markCalled(contact) {
+  // Keep-as-NEW lock: record the call, but NEVER auto-change lead_status on
+  // a locked lead — it keeps whatever status the admin pinned.
+  if (contact.status_locked) {
+    db.prepare('UPDATE contacts SET called = 1, updated_at = ? WHERE id = ?')
+      .run(now(), contact.id);
+    return;
+  }
+  if (contact.source === 'Lead Engine' || contact.lead_status) {
+    db.prepare(
+      "UPDATE contacts SET called = 1, lead_status = 'WORKING', updated_at = ? WHERE id = ?"
+    ).run(now(), contact.id);
+  } else {
+    db.prepare('UPDATE contacts SET called = 1, updated_at = ? WHERE id = ?')
+      .run(now(), contact.id);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contacts CRUD
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/contacts — own contacts; admin sees all (with owner name).
+ * Optional query-string filters (all AND-combined, still owner-scoped):
+ *   q      case-insensitive LIKE across name/property/city/keywords/agentName/sellerName
+ *   city   LIKE city
+ *   state  exact-ish (case-insensitive) state
+ *   agent  LIKE agentName
+ *   fsbo   'true' | 'false' → isFsbo = 1 | 0
+ *   stage  exact pipeline stage
+ */
+router.get('/', (req, res) => {
+  const s = ownerScope(req.user, 'c'); // ISOLATION: owner filter
+  const where = [];
+  const params = [];
+  if (s.where) {
+    where.push(s.where.replace(/^WHERE\s+/, ''));
+    params.push(...s.params);
+  }
+
+  const qp = req.query || {};
+  if (qp.q) {
+    const raw = String(qp.q);
+    const like = '%' + raw + '%';
+    // Address / seller / listing agent / name / city / keywords / phones.
+    const textCols = [
+      'c.name', 'c.property', 'c.city', 'c.keywords', 'c.agentName',
+      'c.sellerName', 'c.agentCompany', 'c.phone', 'c.agentPhone', 'c.fsboPhone',
+    ];
+    const clauses = textCols.map((col) => `${col} LIKE ? COLLATE NOCASE`);
+    const qParams = textCols.map(() => like);
+    // Digits-only phone compare: "5552013344" matches "555-201-3344".
+    const digits = raw.replace(/\D+/g, '');
+    if (digits.length >= 4) {
+      const stripped = (col) =>
+        `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${col},''),'-',''),' ',''),'(',''),')',''),'.',''),'+','')`;
+      for (const col of ['c.phone', 'c.agentPhone', 'c.fsboPhone']) {
+        clauses.push(`${stripped(col)} LIKE ?`);
+        qParams.push('%' + digits + '%');
+      }
+    }
+    where.push('(' + clauses.join(' OR ') + ')');
+    params.push(...qParams);
+  }
+  if (qp.city) { where.push('c.city LIKE ? COLLATE NOCASE'); params.push('%' + String(qp.city) + '%'); }
+  if (qp.state) { where.push('c.state LIKE ? COLLATE NOCASE'); params.push(String(qp.state)); }
+  if (qp.agent) { where.push('c.agentName LIKE ? COLLATE NOCASE'); params.push('%' + String(qp.agent) + '%'); }
+  if (qp.fsbo === 'true' || qp.fsbo === 'false') {
+    where.push('c.isFsbo = ?');
+    params.push(qp.fsbo === 'true' ? 1 : 0);
+  }
+  if (qp.stage) { where.push('c.stage = ?'); params.push(String(qp.stage)); }
+  if (qp.grade) { where.push('c.grade = ? COLLATE NOCASE'); params.push(String(qp.grade)); }
+  if (qp.lead_status) { where.push('c.lead_status = ? COLLATE NOCASE'); params.push(String(qp.lead_status)); }
+
+  const rows = db.prepare(`
+    SELECT c.*, u.name AS ownerName
+    FROM contacts c JOIN users u ON u.id = c.owner_id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY c.created_at DESC
+  `).all(...params);
+  res.json(rows.map(parseContact));
+});
+
+/** Build a full contact row object from a request body (all columns present). */
+function buildContact(body, ownerId) {
+  const ts = now();
+  return {
+    id: uid(),
+    owner_id: ownerId,
+    name: body.name,
+    email: body.email || null,
+    phone: body.phone || null,
+    property: body.property || null,
+    zillow: body.zillow || null,
+    agentName: body.agentName || null,
+    agentPhone: body.agentPhone || null,
+    agentEmail: body.agentEmail || null,
+    stage: body.stage || 'Prospect',
+    notes: body.notes || null,
+    executedContract: body.executedContract || null,
+    closing: body.closing || null,
+    dueDiligence: body.dueDiligence || null,
+    inspectionExpires: body.inspectionExpires || null,
+    source: body.source || null,
+    dnc: toBit(body.dnc),
+    consent_sms: toBit(body.consent_sms),
+    consent_rvm: toBit(body.consent_rvm),
+    texts: JSON.stringify(Array.isArray(body.texts) ? body.texts : DEFAULT_TEXTS),
+    textStatus: JSON.stringify(
+      Array.isArray(body.textStatus) ? body.textStatus : [false, false, false, false]
+    ),
+    rvm: body.rvm || DEFAULT_RVM,
+    rvmStatus: 0,
+    // Lead fields
+    beds: toNum(body.beds),
+    baths: toNum(body.baths),
+    sqft: toNum(body.sqft),
+    agentCompany: body.agentCompany || null,
+    isFsbo: toBit(body.isFsbo),
+    sellerName: body.sellerName || null,
+    fsboPhone: body.fsboPhone || null,
+    fsboEmail: body.fsboEmail || null,
+    daysOnMarket: toNum(body.daysOnMarket),
+    priceChanges: body.priceChanges || null,
+    propertyTax: body.propertyTax !== undefined && body.propertyTax !== null && body.propertyTax !== ''
+      ? String(body.propertyTax) : null,
+    photoUrl: body.photoUrl || null,
+    sourceUrl: body.sourceUrl || null,
+    keywords: Array.isArray(body.keywords) ? body.keywords.join(', ') : (body.keywords || null),
+    city: body.city || null,
+    state: body.state || null,
+    listingDescription: body.listingDescription || null,
+    created_at: ts,
+    updated_at: ts,
+  };
+}
+
+function insertContactRow(contact) {
+  db.prepare(`
+    INSERT INTO contacts (
+      id, owner_id, name, email, phone, property, zillow,
+      agentName, agentPhone, agentEmail, stage, notes,
+      executedContract, closing, dueDiligence, inspectionExpires, source,
+      dnc, consent_sms, consent_rvm, texts, textStatus, rvm, rvmStatus,
+      beds, baths, sqft, agentCompany, isFsbo, sellerName, fsboPhone, fsboEmail,
+      daysOnMarket, priceChanges, propertyTax, photoUrl, sourceUrl, keywords,
+      city, state, listingDescription,
+      created_at, updated_at
+    ) VALUES (
+      @id, @owner_id, @name, @email, @phone, @property, @zillow,
+      @agentName, @agentPhone, @agentEmail, @stage, @notes,
+      @executedContract, @closing, @dueDiligence, @inspectionExpires, @source,
+      @dnc, @consent_sms, @consent_rvm, @texts, @textStatus, @rvm, @rvmStatus,
+      @beds, @baths, @sqft, @agentCompany, @isFsbo, @sellerName, @fsboPhone, @fsboEmail,
+      @daysOnMarket, @priceChanges, @propertyTax, @photoUrl, @sourceUrl, @keywords,
+      @city, @state, @listingDescription,
+      @created_at, @updated_at
+    )
+  `).run(contact);
+}
+
+/** ISOLATION: owner is the requester; only an admin may assign another owner. */
+function resolveOwnerId(req, body) {
+  if (isAdmin(req.user) && body.owner_id) {
+    const target = db.prepare('SELECT id FROM users WHERE id = ?').get(body.owner_id);
+    if (!target) return { error: 'owner_id does not exist' };
+    return { ownerId: body.owner_id };
+  }
+  return { ownerId: req.user.id };
+}
+
+/** POST /api/contacts */
+router.post('/', (req, res) => {
+  const body = req.body || {};
+  if (!body.name) return res.status(400).json({ error: 'name is required' });
+  if (body.stage && !STAGES.includes(body.stage)) {
+    return res.status(400).json({ error: `stage must be one of: ${STAGES.join(', ')}` });
+  }
+
+  const owner = resolveOwnerId(req, body); // ISOLATION
+  if (owner.error) return res.status(400).json({ error: owner.error });
+
+  const contact = buildContact(body, owner.ownerId);
+  insertContactRow(contact);
+  res.status(201).json(parseContact(contact));
+});
+
+// ---------------------------------------------------------------------------
+// Bulk admin actions — ADMIN ONLY (non-admins get 403).
+// ---------------------------------------------------------------------------
+
+/** Coerce {ids:[...]} to a clean array of non-empty string ids (or null). */
+function cleanIds(v) {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const ids = v.map((x) => String(x)).filter((x) => x.trim() !== '');
+  return ids.length ? ids : null;
+}
+
+/**
+ * POST /api/contacts/bulk-assign {ids:[...], owner_id} — ADMIN only.
+ * Sets owner_id on each id. Deliberately touches NOTHING else: lead_status,
+ * opened, called and grade are all preserved exactly as they are.
+ */
+router.post('/bulk-assign', (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+  const body = req.body || {};
+  const ids = cleanIds(body.ids);
+  if (!ids) return res.status(400).json({ error: 'ids must be a non-empty array' });
+  const target = db.prepare('SELECT id FROM users WHERE id = ?').get(String(body.owner_id || ''));
+  if (!target) return res.status(400).json({ error: 'owner_id does not exist' });
+
+  let updated = 0;
+  const ts = now();
+  const setOwner = db.prepare('UPDATE contacts SET owner_id = ?, updated_at = ? WHERE id = ?');
+  const setActOwner = db.prepare('UPDATE activities SET owner_id = ? WHERE contact_id = ?');
+  db.transaction(() => {
+    for (const id of ids) {
+      const r = setOwner.run(target.id, ts, id); // owner only — no status side effects
+      if (Number(r.changes)) {
+        setActOwner.run(target.id, id); // keep activity rows consistent
+        updated++;
+      }
+    }
+  })();
+  res.json({ updated });
+});
+
+/**
+ * POST /api/contacts/bulk-lock {ids:[...], locked:0|1} — ADMIN only.
+ * Locks (or unlocks) the Keep-as-NEW pin on many leads at once.
+ */
+router.post('/bulk-lock', (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+  const body = req.body || {};
+  const ids = cleanIds(body.ids);
+  if (!ids) return res.status(400).json({ error: 'ids must be a non-empty array' });
+  const locked = toBit(body.locked);
+
+  let updated = 0;
+  const ts = now();
+  const setLock = db.prepare('UPDATE contacts SET status_locked = ?, updated_at = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const id of ids) {
+      const r = setLock.run(locked, ts, id);
+      updated += Number(r.changes) || 0;
+    }
+  })();
+  res.json({ updated, locked });
+});
+
+/** GET /api/contacts/:id — also records the "open": first detail view sets
+ * opened=1/opened_at, and NEW / IN QUEUE leads move to WORKING (unless the
+ * lead's status is locked via Keep-as-NEW). */
+router.get('/:id', (req, res) => {
+  let contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  const needsOpen = !contact.opened;
+  // Keep-as-NEW lock: a locked lead may still record opened/opened_at, but
+  // its lead_status is never auto-changed by the open transition.
+  const needsStatus = !contact.status_locked &&
+    (contact.lead_status === 'NEW' || contact.lead_status === 'IN QUEUE');
+  if (needsOpen || needsStatus) {
+    const ts = now();
+    db.prepare(`
+      UPDATE contacts SET
+        opened = 1,
+        opened_at = COALESCE(opened_at, @ts),
+        lead_status = CASE WHEN status_locked = 0 AND lead_status IN ('NEW','IN QUEUE')
+                           THEN 'WORKING' ELSE lead_status END,
+        updated_at = @ts
+      WHERE id = @id
+    `).run({ ts, id: contact.id });
+    contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contact.id);
+  }
+
+  res.json(parseContact(contact));
+});
+
+/** PATCH /api/contacts/:id */
+router.patch('/:id', (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  const body = req.body || {};
+  if (body.stage && !STAGES.includes(body.stage)) {
+    return res.status(400).json({ error: `stage must be one of: ${STAGES.join(', ')}` });
+  }
+  if (body.lead_status !== undefined && body.lead_status !== null && body.lead_status !== '' &&
+      !LEAD_STATUSES.includes(body.lead_status)) {
+    return res.status(400).json({ error: `lead_status must be one of: ${LEAD_STATUSES.join(', ')}` });
+  }
+
+  const sets = [];
+  const params = {};
+  for (const f of CONTACT_FIELDS) {
+    if (!(f in body)) continue;
+    let v = body[f];
+    if (f === 'texts' || f === 'textStatus') v = JSON.stringify(v);
+    if (BOOL_FIELDS.includes(f)) v = toBit(v);
+    if (NUMERIC_FIELDS.includes(f)) v = toNum(v);
+    if (f === 'keywords' && Array.isArray(v)) v = v.join(', ');
+    if (f === 'lead_status' && !v) v = null;
+    if (v === undefined) v = null;
+    sets.push(`${f} = @${f}`);
+    params[f] = v;
+  }
+
+  // ASSIGN-TO-USER: only an ADMIN may change owner_id (the tenant-isolation
+  // key) to assign a lead to a user; non-admins can never reassign.
+  if ('owner_id' in body && String(body.owner_id) !== String(contact.owner_id)) {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Only an admin can reassign a contact' });
+    }
+    const target = db.prepare('SELECT id FROM users WHERE id = ?').get(String(body.owner_id));
+    if (!target) return res.status(400).json({ error: 'owner_id does not exist' });
+    sets.push('owner_id = @owner_id');
+    params.owner_id = target.id;
+    // Keep activity rows consistent with the new owner.
+    db.prepare('UPDATE activities SET owner_id = ? WHERE contact_id = ?').run(target.id, contact.id);
+  }
+
+  if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields supplied' });
+
+  params.updated_at = now();
+  params.id = contact.id;
+  db.prepare(`UPDATE contacts SET ${sets.join(', ')}, updated_at = @updated_at WHERE id = @id`).run(params);
+
+  // Log a stage-change activity when the pipeline stage moves.
+  if (body.stage && body.stage !== contact.stage) {
+    logActivity({
+      contact, user: req.user, type: 'stage', mode: 'manual',
+      body: `Stage changed: ${contact.stage} → ${body.stage}`, status: 'ok',
+    });
+  }
+
+  const updated = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contact.id);
+  res.json(parseContact(updated));
+});
+
+/** DELETE /api/contacts/:id — cascades activities, unlinks tasks. */
+router.delete('/:id', (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  db.transaction(() => {
+    db.prepare('DELETE FROM activities WHERE contact_id = ?').run(contact.id);
+    db.prepare('UPDATE tasks SET contact_id = NULL WHERE contact_id = ?').run(contact.id);
+    db.prepare('DELETE FROM contacts WHERE id = ?').run(contact.id);
+  })();
+
+  res.json({ ok: true, deleted: contact.id });
+});
+
+// ---------------------------------------------------------------------------
+// Activities
+// ---------------------------------------------------------------------------
+
+/** GET /api/contacts/:id/activities — chronological. */
+router.get('/:id/activities', (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+  const rows = db.prepare(
+    'SELECT * FROM activities WHERE contact_id = ? ORDER BY created_at ASC, id ASC'
+  ).all(contact.id);
+  res.json(rows);
+});
+
+const ACTIVITY_TYPES = ['call', 'sms', 'email', 'rvm', 'note', 'stage'];
+
+/** POST /api/contacts/:id/activities {type,body,mode,direction} */
+router.post('/:id/activities', (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  const { type, body, mode, direction } = req.body || {};
+  if (!ACTIVITY_TYPES.includes(type)) {
+    return res.status(400).json({ error: `type must be one of: ${ACTIVITY_TYPES.join(', ')}` });
+  }
+  const act = logActivity({
+    contact, user: req.user, type, body,
+    mode: mode === 'automated' ? 'automated' : 'manual',
+    direction: direction === 'inbound' ? 'inbound' : 'outbound',
+    status: 'logged',
+  });
+  if (type === 'call') markCalled(contact); // call logged -> WORKING
+  res.status(201).json(act);
+});
+
+/** POST /api/contacts/:id/log {type,body} — manual log shortcut. */
+router.post('/:id/log', (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  let { type, body } = req.body || {};
+  if (type === 'text') type = 'sms'; // convenience alias
+  if (!['call', 'sms', 'email', 'note'].includes(type)) {
+    return res.status(400).json({ error: 'type must be call, text/sms, email or note' });
+  }
+  const act = logActivity({
+    contact, user: req.user, type, body, mode: 'manual', status: 'logged',
+  });
+  if (type === 'call') markCalled(contact); // call logged -> WORKING
+  res.status(201).json(act);
+});
+
+// ---------------------------------------------------------------------------
+// Messaging actions (adapters in integrations.js — stub unless creds set)
+// ---------------------------------------------------------------------------
+
+/** POST /api/contacts/:id/send-text {index} — render template #index and send. */
+router.post('/:id/send-text', async (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+
+  const index = Number((req.body || {}).index);
+  if (!Number.isInteger(index) || index < 0 || index > 3) {
+    return res.status(400).json({ error: 'index must be 0-3' });
+  }
+  if (!contact.phone) return res.status(400).json({ error: 'Contact has no phone number' });
+  if (contact.dnc) return res.status(400).json({ error: 'Contact is on the Do-Not-Contact list' });
+
+  const parsed = parseContact(contact);
+  const template = parsed.texts[index] || DEFAULT_TEXTS[index];
+  const rendered = renderTemplate(template, contact, req.user.name);
+
+  const result = await sendSms({
+    to: contact.phone,
+    body: rendered,
+    from: req.user.business_number || process.env.TWILIO_FROM,
+  });
+
+  // Mark textStatus[index] = true
+  const status = parsed.textStatus.slice();
+  while (status.length < 4) status.push(false);
+  status[index] = true;
+  db.prepare('UPDATE contacts SET textStatus = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(status), now(), contact.id);
+
+  const act = logActivity({
+    contact, user: req.user, type: 'sms', mode: 'automated',
+    body: rendered, status: result.status, provider_id: result.sid,
+  });
+
+  res.json({ ok: true, index, message: rendered, result, activity: act });
+});
+
+/** POST /api/contacts/:id/send-rvm — drop the ringless voicemail. */
+router.post('/:id/send-rvm', async (req, res) => {
+  const contact = getOwnedContact(req.params.id, req.user); // isolation check
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+  if (!contact.phone) return res.status(400).json({ error: 'Contact has no phone number' });
+  if (contact.dnc) return res.status(400).json({ error: 'Contact is on the Do-Not-Contact list' });
+
+  const rendered = renderTemplate(contact.rvm || DEFAULT_RVM, contact, req.user.name);
+  const result = await sendRvm({ to: contact.phone, body: rendered });
+
+  db.prepare('UPDATE contacts SET rvmStatus = 1, updated_at = ? WHERE id = ?')
+    .run(now(), contact.id);
+  markCalled(contact); // RVM drop counts as a call -> WORKING
+
+  const act = logActivity({
+    contact, user: req.user, type: 'rvm', mode: 'automated',
+    body: rendered, status: result.status, provider_id: result.sid,
+  });
+
+  res.json({ ok: true, message: rendered, result, activity: act });
+});
+
+// ---------------------------------------------------------------------------
+// Leads — /api/leads (mounted in server.js behind requireAuth)
+//
+// COMPLIANCE NOTE: this app NEVER fetches or scrapes Zillow / Realtor.com /
+// Homes.com or any other listing site (their ToS prohibit it). Lead data
+// comes only from text the user pastes in, or (later) a licensed data
+// provider via integrations.fetchLicensedListings().
+// ---------------------------------------------------------------------------
+
+const leadsRouter = express.Router();
+
+/** Motivated-seller keywords we flag when found in pasted listing text. */
+const LEAD_KEYWORDS = [
+  'fixer upper', 'as-is', 'handyman special', 'investor special', 'tlc',
+  'needs work', 'needs updating', 'cash only', 'motivated seller', 'must sell',
+  'estate sale', 'probate', 'inherited', 'foreclosure', 'short sale',
+  'price reduced', 'diamond in the rough', 'tenant occupied',
+];
+
+/**
+ * parseListingText(text) — best-effort heuristic parse of PASTED listing
+ * text into a draft lead. Pure string work: no network calls of any kind.
+ */
+function parseListingText(text) {
+  const t = String(text).replace(/\r/g, '');
+  const lower = t.toLowerCase();
+  const draft = {};
+
+  // Street address like "123 Maple St, Dallas, TX 75201"
+  const addr = t.match(
+    /\d{1,6}\s+[A-Za-z0-9.'\- ]+?\b(?:St(?:reet)?|Ave(?:nue)?|R(?:oa)?d|Dr(?:ive)?|Lane|Ln|Blvd|Boulevard|Ct|Court|Way|Pl(?:ace)?|Ter(?:race)?|Cir(?:cle)?|Pkwy|Parkway|Trail|Trl|Loop)\b\.?(?:\s*,\s*[A-Za-z.'\- ]+)?(?:\s*,\s*[A-Z]{2})?(?:\s+\d{5}(?:-\d{4})?)?/
+  );
+  if (addr) draft.property = addr[0].trim();
+
+  // City / state from ", Dallas, TX 75201"
+  const cs = t.match(/,\s*([A-Za-z.'\- ]+?)\s*,\s*([A-Z]{2})\b(?:\s+\d{5})?/);
+  if (cs) { draft.city = cs[1].trim(); draft.state = cs[2]; }
+
+  const beds = t.match(/(\d+(?:\.\d+)?)\s*(?:bd|bds|beds?|bedrooms?)\b/i);
+  if (beds) draft.beds = Number(beds[1]);
+
+  const baths = t.match(/(\d+(?:\.\d+)?)\s*(?:ba|baths?|bathrooms?)\b/i);
+  if (baths) draft.baths = Number(baths[1]);
+
+  const sqft = t.match(/([\d,]{3,})\s*(?:sq\.?\s*\.?ft\.?|sqft|square\s+feet)/i);
+  if (sqft) draft.sqft = Number(sqft[1].replace(/,/g, ''));
+
+  const price = t.match(/\$\s?([\d,]{4,}(?:\.\d+)?)/);
+  if (price) draft.price = Number(price[1].replace(/,/g, ''));
+
+  const dom =
+    t.match(/(\d+)\s*days?\s+on\s+(?:the\s+)?market/i) ||
+    t.match(/\bdom[:\s]+(\d+)/i) ||
+    t.match(/on\s+market[:\s]+(\d+)/i);
+  if (dom) draft.daysOnMarket = Number(dom[1]);
+
+  const tax =
+    t.match(/(?:property|annual)\s+tax(?:es)?[:\s]*\$?\s*([\d,]+(?:\.\d+)?)/i) ||
+    t.match(/tax(?:es)?[:\s]+\$\s*([\d,]+(?:\.\d+)?)/i);
+  if (tax) draft.propertyTax = tax[1].replace(/,/g, '');
+
+  const priceChanges = t.match(/price\s+(?:reduced|cut|drop(?:ped)?|improvement)[^.\n]*/gi);
+  if (priceChanges) draft.priceChanges = priceChanges.map((s) => s.trim()).join('; ');
+
+  const phone = t.match(/(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b/);
+  const email = t.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/);
+
+  draft.isFsbo = /for\s+sale\s+by\s+owner|\bfsbo\b/i.test(t);
+
+  const agent = t.match(
+    /(?:[Ll]isted\s+[Bb]y|[Ll]isting\s+[Aa]gent|[Aa]gent)[:\s]+([A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){1,2})/
+  );
+  const company =
+    t.match(/(?:brokered\s+by|brokerage|courtesy\s+of|company)[:\s]+([^,\n]+)/i) ||
+    t.match(/,\s*([A-Za-z.'\- ]*(?:Realty|Real\s+Estate|Brokerage|Properties|Group|Associates|Homes)(?:\s+[A-Za-z.'\-]+)*)/);
+
+  if (draft.isFsbo) {
+    const seller = t.match(
+      /(?:[Oo]wner|[Ss]eller|[Cc]ontact)[:\s]+([A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,2})/
+    );
+    if (seller) draft.sellerName = seller[1].trim();
+    if (phone) draft.fsboPhone = phone[0].trim();
+    if (email) draft.fsboEmail = email[0].trim();
+  } else {
+    if (agent) draft.agentName = agent[1].trim();
+    if (company) draft.agentCompany = company[1].trim();
+    if (phone) draft.agentPhone = phone[0].trim();
+    if (email) draft.agentEmail = email[0].trim();
+  }
+
+  draft.keywords = LEAD_KEYWORDS.filter((k) => lower.includes(k));
+  return draft;
+}
+
+/**
+ * POST /api/leads/parse { url, text } — parse PASTED listing text into a
+ * draft lead for the user to review. Never fetches `url`; it is only kept
+ * as sourceUrl. Nothing is saved here — the frontend POSTs /api/leads after
+ * the user reviews the draft.
+ */
+leadsRouter.post('/parse', (req, res) => {
+  const { url, text } = req.body || {};
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ error: 'text is required — paste the listing description' });
+  }
+  const draft = parseListingText(text);
+  draft.sourceUrl = url ? String(url) : null; // stored, never fetched
+  draft.listingDescription = String(text);
+  res.json(draft);
+});
+
+/**
+ * POST /api/leads — create a NEW LEAD contact.
+ * Stage is forced to 'Prospect'. Owner is the requester; an admin may pass
+ * body.owner_id to assign the lead to a specific user (that user then has
+ * exclusive access under the normal tenant-isolation rules).
+ */
+leadsRouter.post('/', (req, res) => {
+  const body = req.body || {};
+
+  const owner = resolveOwnerId(req, body); // ISOLATION
+  if (owner.error) return res.status(400).json({ error: owner.error });
+
+  const name =
+    body.name || body.sellerName || body.agentName || body.property || 'New Lead';
+
+  const contact = buildContact(
+    { ...body, name, stage: 'Prospect', source: body.source || 'Lead' },
+    owner.ownerId
+  );
+  insertContactRow(contact);
+  res.status(201).json(parseContact(contact));
+});
+
+module.exports = router;
+module.exports.leadsRouter = leadsRouter;

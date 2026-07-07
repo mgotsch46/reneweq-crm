@@ -1,0 +1,19 @@
+{
+  "name": "wholesale-crm",
+  "version": "1.0.0",
+  "description": "Wholesale real-estate CRM (Express + built-in node:sqlite)",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.6.0"
+  }
+}
