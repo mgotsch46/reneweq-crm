@@ -22,6 +22,7 @@ const state = {
   contacts: [],
   tasks: [],
   users: [],
+  assignees: [], // active users for task assignment (all roles can load this)
   google: null, // {configured, connected, email} from /api/google/status
   tab: 'pipeline',
   contactSearch: '',
@@ -256,6 +257,11 @@ async function refreshTasks() {
 }
 async function refreshUsers() {
   state.users = await api('GET', '/users') || [];
+}
+async function refreshAssignees() {
+  // Active users any role can assign tasks to (id, name, active).
+  try { state.assignees = await api('GET', '/tasks/assignees') || []; }
+  catch (e) { state.assignees = []; }
 }
 async function refreshGoogleStatus() {
   try {
@@ -578,7 +584,7 @@ function renderBulkBar() {
     '<b>' + ids.length + ' selected</b>' +
     '<span>Assign to</span>' +
     '<select id="bulkOwner"><option value="">Choose user…</option>' +
-    state.users.map(function (u) {
+    state.users.filter(function (u) { return truthy(u.active); }).map(function (u) {
       return '<option value="' + escAttr(u.id) + '">' + esc(u.name) + ' (' + esc(u.email) + ')</option>';
     }).join('') +
     '</select>' +
@@ -942,6 +948,19 @@ function openContactModal(contact, leadDraft) {
     (!isNew && !canRvm ? '<p class="hint">Dropping disabled: ' + (truthy(c.dnc) ? 'contact is marked DNC.' : 'RVM consent not granted.') + '</p>' : '') +
     '</div>';
 
+  // ---- Tasks (linked to this contact)
+  html += '<div class="sec"><h4>Tasks</h4>' +
+    (isNew
+      ? '<p class="hint">Save the contact first to add tasks for it.</p>'
+      : '<p class="hint" style="margin:0 0 10px">Tasks you add here are linked to this contact and also appear in your main Tasks list.</p>' +
+        '<div class="taskform">' +
+        '  <div class="field" style="flex:2"><label>New task</label><input id="ctTaskTitle" type="text" placeholder="e.g. Follow up with seller"></div>' +
+        '  <div class="field"><label>Due date</label><input id="ctTaskDue" type="date"></div>' +
+        '  <button class="btn" id="ctTaskAdd" type="button">Add Task</button>' +
+        '</div>' +
+        '<div class="tasklist" id="contactTasks"><p class="hint">Loading tasks...</p></div>') +
+    '</div>';
+
   // ---- Activity log
   html += '<div class="sec"><h4>Activity Log</h4><div class="log" id="activityLog">' +
     (isNew ? '<p class="hint">Activity appears after the contact is saved.</p>' : '<p class="hint">Loading activity...</p>') +
@@ -1049,6 +1068,33 @@ function openContactModal(contact, leadDraft) {
     });
   });
 
+  // ---- Contact tasks (linked to this contact)
+  loadContactTasks(c.id, overlay);
+  const ctAdd = $('#ctTaskAdd', overlay);
+  if (ctAdd) {
+    ctAdd.addEventListener('click', async function () {
+      const titleEl = $('#ctTaskTitle', overlay);
+      const title = titleEl.value.trim();
+      if (!title) { toast('Enter a task title.', 'error'); return; }
+      const dueEl = $('#ctTaskDue', overlay);
+      const body = { title: title, contact_id: c.id };
+      if (dueEl && dueEl.value) body.due_date = dueEl.value;
+      ctAdd.disabled = true;
+      try {
+        await api('POST', '/tasks', body);
+        titleEl.value = '';
+        if (dueEl) dueEl.value = '';
+        toast('Task added', 'ok');
+        await loadContactTasks(c.id, overlay);
+      } catch (e) { toastErr(e); }
+      ctAdd.disabled = false;
+    });
+    const ctTitle = $('#ctTaskTitle', overlay);
+    if (ctTitle) ctTitle.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') ctAdd.click();
+    });
+  }
+
   // ---- Send automated text
   $all('[data-send-text]', overlay).forEach(function (btn) {
     btn.addEventListener('click', async function () {
@@ -1111,10 +1157,19 @@ function openContactModal(contact, leadDraft) {
         if (!state.users.length) await refreshUsers();
         const sel = $('#assignOwner', overlay);
         if (!sel) return;
-        sel.innerHTML = state.users.map(function (u) {
+        // Only active team members are assignable. If this contact is already
+        // owned by someone since deactivated, keep them in the list (labeled)
+        // so the current assignment isn't silently hidden.
+        const assignable = state.users.filter(function (u) { return truthy(u.active); });
+        if (c.owner_id && !assignable.some(function (u) { return String(u.id) === String(c.owner_id); })) {
+          const cur = state.users.find(function (u) { return String(u.id) === String(c.owner_id); });
+          if (cur) assignable.unshift(cur);
+        }
+        sel.innerHTML = assignable.map(function (u) {
           return '<option value="' + escAttr(u.id) + '"' +
             (String(u.id) === String(c.owner_id) ? ' selected' : '') + '>' +
-            esc(u.name) + ' (' + esc(u.email) + ')</option>';
+            esc(u.name) + ' (' + esc(u.email) + ')' +
+            (truthy(u.active) ? '' : ' — inactive') + '</option>';
         }).join('');
         sel.disabled = false;
         sel.addEventListener('change', async function () {
@@ -1277,6 +1332,7 @@ async function loadAndRenderTasks() {
   root.innerHTML = '<div class="viewhead"><h2>Tasks</h2></div><div class="empty">Loading...</div>';
   try {
     await refreshTasks();
+    await refreshAssignees(); // active users for the per-task "Assign to" editor
     // ensure contacts loaded for the link dropdown
     if (!state.contacts.length) await refreshContacts().catch(function () {});
   } catch (e) {
@@ -1291,21 +1347,15 @@ function renderTasks() {
   const open = state.tasks.filter(function (t) { return !truthy(t.done); });
   const done = state.tasks.filter(function (t) { return truthy(t.done); });
 
-  let contactOpts = '<option value="">— No linked contact —</option>';
-  state.contacts.forEach(function (c) {
-    contactOpts += '<option value="' + escAttr(c.id) + '">' + esc(c.name || c.property || ('Contact #' + c.id)) + '</option>';
-  });
-
   let html = '' +
     '<div class="viewhead">' +
     '  <h2>Tasks</h2>' +
     '  <button class="btn blue" id="icsBtn">Export to Calendar/To-Do (.ics)</button>' +
     '</div>' +
-    '<div class="banner">The .ics export can be imported into (or subscribed to from) Google Calendar, Apple Calendar/Reminders, and Outlook — your CRM tasks show up as calendar events with due dates.</div>' +
+    '<div class="banner">This is your full task list — every task you create, including ones added inside a contact. Admins see all users’ tasks; each user sees only their own. To add a task linked to a specific contact, open that contact and use its Tasks section. The form below is for general tasks that aren’t tied to a contact.</div>' +
     '<div class="taskform">' +
-    '  <div class="field" style="flex:2"><label>New task</label><input id="taskTitle" type="text" placeholder="e.g. Follow up with seller"></div>' +
+    '  <div class="field" style="flex:2"><label>New task (no contact)</label><input id="taskTitle" type="text" placeholder="e.g. Order more yard signs"></div>' +
     '  <div class="field"><label>Due date</label><input id="taskDue" type="date"></div>' +
-    '  <div class="field"><label>Link to contact</label><select id="taskContact">' + contactOpts + '</select></div>' +
     '  <button class="btn" id="taskAdd">Add Task</button>' +
     '</div>';
 
@@ -1326,8 +1376,6 @@ function renderTasks() {
     const body = { title: title };
     const due = $('#taskDue').value;
     if (due) body.due_date = due;
-    const cid = $('#taskContact').value;
-    if (cid) body.contact_id = isNaN(Number(cid)) ? cid : Number(cid);
     try {
       await api('POST', '/tasks', body);
       await refreshTasks();
@@ -1341,6 +1389,7 @@ function renderTasks() {
 
   $all('.taskitem', root).forEach(function (item) {
     const id = item.getAttribute('data-id');
+    wireTaskEditing(item, async function () { await refreshTasks(); renderTasks(); });
     const cb = $('input[type=checkbox]', item);
     cb.addEventListener('change', async function () {
       try {
@@ -1386,6 +1435,26 @@ function renderTasks() {
   });
 }
 
+/** <option> list of ACTIVE users for assigning a task, current owner selected.
+ *  If the task's current owner is inactive, keep them (labeled) so reassignment
+ *  choices never silently drop the existing assignment. */
+function taskAssigneeOptions(ownerId) {
+  // Prefer the all-roles assignee list; fall back to the admin user list.
+  const source = (state.assignees && state.assignees.length) ? state.assignees : (state.users || []);
+  const assignable = source.filter(function (u) { return truthy(u.active); });
+  if (ownerId && !assignable.some(function (u) { return String(u.id) === String(ownerId); })) {
+    const cur = (state.users || []).find(function (u) { return String(u.id) === String(ownerId); });
+    if (cur) assignable.unshift(cur);
+  }
+  return assignable.map(function (u) {
+    const me = state.user && String(u.id) === String(state.user.id);
+    return '<option value="' + escAttr(u.id) + '"' +
+      (String(u.id) === String(ownerId) ? ' selected' : '') + '>' +
+      esc(u.name) + (me ? ' (me)' : '') +
+      (truthy(u.active) ? '' : ' — inactive') + '</option>';
+  }).join('');
+}
+
 function taskItemHtml(t) {
   const isDone = truthy(t.done);
   const contact = t.contact_id
@@ -1405,13 +1474,115 @@ function taskItemHtml(t) {
   return '<div class="taskitem' + (isDone ? ' done' : '') + '" data-id="' + escAttr(t.id) + '">' +
     '<input type="checkbox"' + (isDone ? ' checked' : '') + ' title="Toggle done">' +
     '<span class="tt">' + esc(t.title || '') +
-    (isAdmin() && t.ownerName ? ' <span class="tag grey">' + esc(t.ownerName) + '</span>' : '') +
+    (t.ownerName ? ' <span class="tag grey" title="Assigned to">' + esc(t.ownerName) + '</span>' : '') +
     '</span>' +
     (contact ? '<button class="linklike" data-contact-link="' + escAttr(contact.id) + '">' + esc(contact.name || 'contact') + '</button>' : '') +
     (dd ? '<span class="due' + (overdue ? ' overdue' : '') + '">due ' + esc(dd) + '</span>' : '') +
     googleBit +
+    '<button class="btn ghost small" data-edit="1">Edit</button>' +
     '<button class="btn ghost small" data-del="1">Delete</button>' +
+    // Hidden inline editor: title, due date, assignee (active users).
+    '<div class="taskform taskedit" data-edit-panel style="display:none;flex-basis:100%;margin-top:8px">' +
+    '<div class="field" style="flex:2"><label>Task</label>' +
+    '<input type="text" data-edit-title value="' + escAttr(t.title || '') + '"></div>' +
+    '<div class="field"><label>Due date</label>' +
+    '<input type="date" data-edit-due value="' + escAttr(dd || '') + '"></div>' +
+    '<div class="field"><label>Assign to</label>' +
+    '<select data-edit-owner>' + taskAssigneeOptions(t.owner_id) + '</select></div>' +
+    '<button class="btn small" data-edit-save>Save</button>' +
+    '<button class="btn ghost small" data-edit-cancel>Cancel</button>' +
+    '</div>' +
     '</div>';
+}
+
+/** Wire the inline Edit panel on a single .taskitem. `reload` re-renders the
+ *  surrounding list after a successful save. Shared by the Tasks page and the
+ *  per-contact task list. */
+function wireTaskEditing(item, reload) {
+  const id = item.getAttribute('data-id');
+  const panel = $('[data-edit-panel]', item);
+  const editBtn = $('[data-edit]', item);
+  if (!panel || !editBtn) return;
+  editBtn.addEventListener('click', function () {
+    panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+  });
+  const cancel = $('[data-edit-cancel]', item);
+  if (cancel) cancel.addEventListener('click', function () { panel.style.display = 'none'; });
+  const save = $('[data-edit-save]', item);
+  if (save) save.addEventListener('click', async function () {
+    const title = $('[data-edit-title]', item).value.trim();
+    if (!title) { toast('Task title cannot be empty.', 'error'); return; }
+    const body = {
+      title: title,
+      due_date: $('[data-edit-due]', item).value || null,
+      owner_id: $('[data-edit-owner]', item).value,
+    };
+    save.disabled = true;
+    try {
+      await api('PATCH', '/tasks/' + encodeURIComponent(id), body);
+      toast('Task updated', 'ok');
+      await reload();
+    } catch (e) { toastErr(e); save.disabled = false; }
+  });
+}
+
+/** Load + render the tasks linked to a single contact, inside its modal. */
+async function loadContactTasks(contactId, overlay) {
+  const box = overlay ? $('#contactTasks', overlay) : $('#contactTasks');
+  if (!box) return;
+  try {
+    await refreshTasks(); // owner-scoped; admin sees all, users see their own
+    if (!state.assignees.length) await refreshAssignees(); // for the "Assign to" editor
+    const list = state.tasks.filter(function (t) {
+      return String(t.contact_id) === String(contactId);
+    });
+    if (!list.length) {
+      box.innerHTML = '<p class="hint">No tasks yet for this contact.</p>';
+      return;
+    }
+    box.innerHTML = list.map(taskItemHtml).join('');
+    wireContactTaskItems(box, contactId, overlay);
+  } catch (e) {
+    box.innerHTML = '<p class="hint">Could not load tasks: ' + esc(e.message) + '</p>';
+  }
+}
+
+/** Wire done/delete/push-google on task rows shown inside a contact modal. */
+function wireContactTaskItems(box, contactId, overlay) {
+  $all('.taskitem', box).forEach(function (item) {
+    const id = item.getAttribute('data-id');
+    wireTaskEditing(item, function () { return loadContactTasks(contactId, overlay); });
+    const cb = $('input[type=checkbox]', item);
+    if (cb) cb.addEventListener('change', async function () {
+      try {
+        await api('PATCH', '/tasks/' + encodeURIComponent(id), { done: cb.checked });
+        await loadContactTasks(contactId, overlay);
+      } catch (e) { toastErr(e); }
+    });
+    const del = $('[data-del]', item);
+    if (del) del.addEventListener('click', async function () {
+      try {
+        await api('DELETE', '/tasks/' + encodeURIComponent(id));
+        toast('Task deleted', 'ok');
+        await loadContactTasks(contactId, overlay);
+      } catch (e) { toastErr(e); }
+    });
+    const pushBtn = $('[data-push-google]', item);
+    if (pushBtn) pushBtn.addEventListener('click', async function () {
+      pushBtn.disabled = true;
+      const orig = pushBtn.textContent;
+      pushBtn.textContent = 'Sending...';
+      try {
+        await api('POST', '/tasks/' + encodeURIComponent(id) + '/push-google');
+        toast('Task sent to Google', 'ok');
+        await loadContactTasks(contactId, overlay);
+      } catch (e) {
+        toastErr(e);
+        pushBtn.textContent = orig;
+        pushBtn.disabled = false;
+      }
+    });
+  });
 }
 
 async function exportIcs() {
@@ -1801,7 +1972,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // Toast + clean URL when returning from the Google consent screen.
   handleGoogleReturnParam();
 
-  // boot
+  // boot the app
   if (state.token) {
     bootApp();
   } else {
