@@ -22,6 +22,7 @@ const state = {
   contacts: [],
   tasks: [],
   users: [],
+  google: null, // {configured, connected, email} from /api/google/status
   tab: 'pipeline',
   contactSearch: '',
   contactList: null, // server-filtered list for the Contacts view
@@ -223,6 +224,7 @@ async function bootApp() {
   } catch (e) {
     state.config = { messagingMode: 'stub' };
   }
+  await refreshGoogleStatus(); // never throws
 
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
@@ -254,6 +256,29 @@ async function refreshTasks() {
 }
 async function refreshUsers() {
   state.users = await api('GET', '/users') || [];
+}
+async function refreshGoogleStatus() {
+  try {
+    state.google = await api('GET', '/google/status');
+  } catch (e) {
+    state.google = null; // older server / fetch failure — treat as unavailable
+  }
+  return state.google;
+}
+
+/* After returning from Google's consent screen the callback redirects to
+   /?google=connected or /?google=error — show a toast, then clean the URL. */
+function handleGoogleReturnParam() {
+  let params;
+  try { params = new URLSearchParams(window.location.search); }
+  catch (e) { return; }
+  if (!params.has('google')) return;
+  const v = params.get('google');
+  if (v === 'connected') toast('Google account connected — tasks will sync.', 'ok');
+  else toast('Google connection failed. Please try again.', 'error');
+  params.delete('google');
+  const rest = params.toString();
+  window.history.replaceState({}, '', window.location.pathname + (rest ? '?' + rest : ''));
 }
 
 /* ------------------------------ Tabs ------------------------------ */
@@ -1340,6 +1365,24 @@ function renderTasks() {
         if (c) openContactModal(c);
       });
     }
+    const pushBtn = $('[data-push-google]', item);
+    if (pushBtn) {
+      pushBtn.addEventListener('click', async function () {
+        pushBtn.disabled = true;
+        const orig = pushBtn.textContent;
+        pushBtn.textContent = 'Sending...';
+        try {
+          await api('POST', '/tasks/' + encodeURIComponent(id) + '/push-google');
+          await refreshTasks();
+          renderTasks();
+          toast('Task sent to Google', 'ok');
+        } catch (e) {
+          toastErr(e);
+          pushBtn.textContent = orig;
+          pushBtn.disabled = false;
+        }
+      });
+    }
   });
 }
 
@@ -1351,6 +1394,14 @@ function taskItemHtml(t) {
   const today = new Date().toISOString().slice(0, 10);
   const dd = dateInputVal(t.due_date);
   const overdue = !isDone && dd && dd < today;
+  const gConnected = state.google && state.google.connected;
+  let googleBit = '';
+  if (t.google_task_id) {
+    googleBit = '<span class="tag blue" title="Synced to Google Tasks' +
+      (t.google_event_id ? ' + Calendar' : '') + '">Google &#10003;</span>';
+  } else if (gConnected && !isDone) {
+    googleBit = '<button class="btn ghost small" data-push-google="1" title="Push this task to Google Tasks (and Calendar if it has a due date)">Send to Google</button>';
+  }
   return '<div class="taskitem' + (isDone ? ' done' : '') + '" data-id="' + escAttr(t.id) + '">' +
     '<input type="checkbox"' + (isDone ? ' checked' : '') + ' title="Toggle done">' +
     '<span class="tt">' + esc(t.title || '') +
@@ -1358,6 +1409,7 @@ function taskItemHtml(t) {
     '</span>' +
     (contact ? '<button class="linklike" data-contact-link="' + escAttr(contact.id) + '">' + esc(contact.name || 'contact') + '</button>' : '') +
     (dd ? '<span class="due' + (overdue ? ' overdue' : '') + '">due ' + esc(dd) + '</span>' : '') +
+    googleBit +
     '<button class="btn ghost small" data-del="1">Delete</button>' +
     '</div>';
 }
@@ -1655,10 +1707,66 @@ function renderSettings() {
     '(<code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM_NUMBER</code>) in the server’s ' +
     '<code>.env</code> file. Once those are set and the number’s A2P campaign is approved, the server switches to live mode automatically. ' +
     'Manual tap-to-text, tap-to-call, and email links in the contact modal work from your own device without any of that setup.</p>' +
+    '<h3 style="margin-top:18px">Google Tasks &amp; Calendar</h3>' +
+    '<div id="googleBox"><p class="hint">Checking Google status…</p></div>' +
     '<h3 style="margin-top:18px">Account</h3>' +
     '<div class="kv"><b>Signed in as:</b> ' + esc(state.user ? state.user.name : '') + ' (' + esc(state.user ? state.user.email : '') + ')</div>' +
     '<div class="kv"><b>Role:</b> ' + esc(state.user ? state.user.role : '') + '</div>' +
     '</div>';
+
+  renderGoogleBox(); // render from cached status immediately...
+  refreshGoogleStatus().then(renderGoogleBox); // ...then re-check the server
+}
+
+/* Google section of Settings — status card + Connect/Disconnect actions. */
+function renderGoogleBox() {
+  const box = $('#googleBox');
+  if (!box) return;
+
+  const g = state.google;
+  if (!g || !g.configured) {
+    box.innerHTML = '<p class="hint" style="opacity:.7">Google integration not configured yet. ' +
+      'Once <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> are set on the server, ' +
+      'you can connect your Google account here to sync CRM tasks to Google Tasks and Calendar.</p>';
+    return;
+  }
+
+  if (!g.connected) {
+    box.innerHTML = '<p class="hint">Connect your Google account and every new CRM task is added to ' +
+      'Google Tasks — tasks with a due date also become an all-day Google Calendar event with a reminder.</p>' +
+      '<div class="actions-row"><button class="btn" id="gConnect">Connect Google</button></div>';
+    $('#gConnect').addEventListener('click', async function () {
+      const btn = this;
+      btn.disabled = true;
+      try {
+        const out = await api('GET', '/google/auth') || {};
+        if (!out.url) throw new Error('Could not start Google sign-in.');
+        window.location = out.url; // off to Google's consent screen
+      } catch (e) {
+        toastErr(e);
+        btn.disabled = false;
+      }
+    });
+    return;
+  }
+
+  box.innerHTML = '<div class="kv"><b>Connected as:</b> ' + esc(g.email || 'Google account') +
+    ' <span class="pill sent"><input type="checkbox" disabled checked> Syncing</span></div>' +
+    '<p class="hint" style="margin:6px 0 10px">New tasks are pushed to Google Tasks; tasks with a due date also get an all-day Calendar event.</p>' +
+    '<div class="actions-row"><button class="btn ghost small" id="gDisconnect">Disconnect</button></div>';
+  $('#gDisconnect').addEventListener('click', async function () {
+    const btn = this;
+    btn.disabled = true;
+    try {
+      await api('POST', '/google/disconnect');
+      toast('Google account disconnected', 'ok');
+      await refreshGoogleStatus();
+      renderGoogleBox();
+    } catch (e) {
+      toastErr(e);
+      btn.disabled = false;
+    }
+  });
 }
 
 /* ------------------------------ Wiring / init ------------------------------ */
@@ -1689,6 +1797,9 @@ document.addEventListener('DOMContentLoaded', function () {
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape') closeModal();
   });
+
+  // Toast + clean URL when returning from the Google consent screen.
+  handleGoogleReturnParam();
 
   // boot
   if (state.token) {
