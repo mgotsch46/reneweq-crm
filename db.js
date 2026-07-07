@@ -277,6 +277,38 @@ const LEAD_STATUS_COLUMNS = [
 }
 
 // ---------------------------------------------------------------------------
+// Idempotent migration — Google integration (same pattern as the blocks
+// above). google_accounts stores per-user OAuth tokens; tasks gain the ids
+// of their synced Google Task / Calendar event.
+// ---------------------------------------------------------------------------
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS google_accounts (
+  user_id       TEXT PRIMARY KEY REFERENCES users(id),
+  email         TEXT,
+  access_token  TEXT,
+  refresh_token TEXT,
+  token_expiry  TEXT,
+  connected_at  TEXT
+)`);
+
+const GOOGLE_TASK_COLUMNS = [
+  ['google_task_id', 'TEXT'],
+  ['google_event_id', 'TEXT'],
+];
+
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(tasks)').all().map((col) => col.name)
+  );
+  for (const [name, type] of GOOGLE_TASK_COLUMNS) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Settings — simple key/value store (Lead Engine auto-import config, etc.).
 // ---------------------------------------------------------------------------
 
