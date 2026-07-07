@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wholesale REI CRM</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- LOGIN / REGISTER -->
+<div id="login" class="hidden">
+  <div class="card">
+    <h1>Wholesale <span>REI CRM</span></h1>
+    <p class="sub" id="authSub">Sign in to your workspace</p>
+
+    <div class="field" id="regNameField" style="display:none">
+      <label for="authName">Name</label>
+      <input id="authName" type="text" autocomplete="name" placeholder="Your name">
+    </div>
+    <div class="field">
+      <label for="authEmail">Email</label>
+      <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com">
+    </div>
+    <div class="field">
+      <label for="authPassword">Password</label>
+      <input id="authPassword" type="password" autocomplete="current-password" placeholder="********">
+    </div>
+
+    <button id="authSubmit" class="btn wide">Sign in</button>
+    <div class="err" id="authErr"></div>
+
+    <p style="margin:14px 0 0;font-size:13px;color:var(--muted)">
+      <span id="authToggleLabel">Need an account?</span>
+      <button type="button" class="linklike" id="authToggle">Create account</button>
+    </p>
+
+    <div class="demo-hint">
+      Demo logins:<br>
+      <code>admin@demo.com</code> / <code>admin123</code> (admin)<br>
+      <code>marisa@demo.com</code> / <code>demo123</code>
+    </div>
+  </div>
+</div>
+
+<!-- APP SHELL -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="logo">Wholesale <span>REI CRM</span></div>
+    <nav class="tabs" id="navTabs">
+      <button data-tab="pipeline">Pipeline</button>
+      <button data-tab="contacts">Contacts</button>
+      <button data-tab="leadengine">Lead Engine</button>
+      <button data-tab="tasks">Tasks</button>
+      <button data-tab="team" id="teamTabBtn" class="hidden">Team</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div class="spacer"></div>
+    <span class="mode-badge" id="modeBadge">...</span>
+    <div class="who" id="whoBox"></div>
+    <button class="btn ghost small" id="logoutBtn">Log out</button>
+  </header>
+
+  <main>
+    <section id="view-pipeline" class="view hidden"></section>
+    <section id="view-contacts" class="view hidden"></section>
+    <section id="view-leadengine" class="view hidden"></section>
+    <section id="view-tasks" class="view hidden"></section>
+    <section id="view-team" class="view hidden"></section>
+    <section id="view-settings" class="view hidden"></section>
+  </main>
+</div>
+
+<!-- MODAL MOUNT -->
+<div id="modalMount"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
