@@ -9,6 +9,7 @@
 const express = require('express');
 const { db, uid, now } = require('../db');
 const { ownerScope, canTouch } = require('./helpers');
+const google = require('./google'); // Google Tasks/Calendar sync (best-effort)
 
 const router = express.Router();
 
@@ -31,8 +32,25 @@ router.get('/', (req, res) => {
   res.json(rows);
 });
 
+/**
+ * Push a task to Google (Tasks + Calendar) and persist the returned ids.
+ * Best-effort: returns the push result; never throws into the request.
+ */
+async function syncTaskToGoogle(ownerId, task) {
+  const g = await google.pushTaskToGoogle(ownerId, task);
+  if (g && (g.taskId || g.eventId)) {
+    db.prepare(`
+      UPDATE tasks SET
+        google_task_id  = COALESCE(@gt, google_task_id),
+        google_event_id = COALESCE(@ge, google_event_id)
+      WHERE id = @id
+    `).run({ gt: g.taskId, ge: g.eventId, id: task.id });
+  }
+  return g || { taskId: null, eventId: null, error: 'push failed' };
+}
+
 /** POST /api/tasks {title, due_date?, contact_id?, external_ref?} */
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { title, due_date, contact_id, external_ref } = req.body || {};
   if (!title) return res.status(400).json({ error: 'title is required' });
 
@@ -58,7 +76,39 @@ router.post('/', (req, res) => {
     INSERT INTO tasks (id, owner_id, title, due_date, done, contact_id, external_ref, created_at)
     VALUES (@id, @owner_id, @title, @due_date, @done, @contact_id, @external_ref, @created_at)
   `).run(task);
+
+  // Best-effort Google sync — a failure never blocks the 201 for the saved task.
+  task.google_task_id = null;
+  task.google_event_id = null;
+  try {
+    const g = await syncTaskToGoogle(task.owner_id, task);
+    task.google_task_id = g.taskId || null;
+    task.google_event_id = g.eventId || null;
+  } catch (e) {
+    console.error('[google] task sync failed:', e.message);
+  }
   res.status(201).json(task);
+});
+
+/**
+ * POST /api/tasks/:id/push-google — manually push/re-push a task to Google
+ * Tasks + Calendar. Owner-scoped. Returns the updated task on success.
+ */
+router.post('/:id/push-google', async (req, res) => {
+  const task = getOwnedTask(req.params.id, req.user); // isolation check
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+
+  let g;
+  try {
+    g = await syncTaskToGoogle(task.owner_id, task); // owner's Google account
+  } catch (e) {
+    console.error('[google] push-google failed:', e.message);
+    return res.status(502).json({ error: 'Could not reach Google' });
+  }
+  if (!g.taskId && !g.eventId) {
+    return res.status(400).json({ error: g.error || 'Could not push task to Google' });
+  }
+  res.json(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id));
 });
 
 /** PATCH /api/tasks/:id {title?, due_date?, done?, contact_id?, external_ref?} */
@@ -85,7 +135,13 @@ router.patch('/:id', (req, res) => {
   if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields supplied' });
 
   db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = @id`).run(params);
-  res.json(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id));
+  const updated = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
+
+  // Best-effort: mark the synced Google Task completed (fire-and-forget).
+  if ('done' in body && body.done && updated.google_task_id) {
+    google.completeTaskGoogle(updated.owner_id, updated).catch(() => {});
+  }
+  res.json(updated);
 });
 
 /** DELETE /api/tasks/:id */
@@ -93,11 +149,13 @@ router.delete('/:id', (req, res) => {
   const task = getOwnedTask(req.params.id, req.user); // isolation check
   if (!task) return res.status(404).json({ error: 'Task not found' });
   db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+  // Best-effort: remove the synced Google Task/event too (fire-and-forget).
+  google.deleteTaskGoogle(task.owner_id, task).catch(() => {});
   res.json({ ok: true, deleted: task.id });
 });
 
 // ---------------------------------------------------------------------------
-// iCalendar export — VTODO entries for the REQUESTER'S open tasks.
+// iCalendar export -- VTODO entries for the REQUESTER'S open tasks.
 // ---------------------------------------------------------------------------
 
 /** Escape text per RFC 5545. */
