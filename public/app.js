@@ -1438,13 +1438,16 @@ function renderTasks() {
 /** <option> list of ACTIVE users for assigning a task, current owner selected.
  *  If the task's current owner is inactive, keep them (labeled) so reassignment
  *  choices never silently drop the existing assignment. */
-function taskAssigneeOptions(ownerId) {
+function taskAssigneeOptions(ownerId, ownerName) {
   // Prefer the all-roles assignee list; fall back to the admin user list.
   const source = (state.assignees && state.assignees.length) ? state.assignees : (state.users || []);
   const assignable = source.filter(function (u) { return truthy(u.active); });
   if (ownerId && !assignable.some(function (u) { return String(u.id) === String(ownerId); })) {
-    const cur = (state.users || []).find(function (u) { return String(u.id) === String(ownerId); });
-    if (cur) assignable.unshift(cur);
+    // Current owner isn't an active user (deactivated/legacy). Keep them as a
+    // selected option so editing the task doesn't silently reassign it.
+    const cur = (state.users || []).find(function (u) { return String(u.id) === String(ownerId); })
+      || { id: ownerId, name: ownerName || 'Current owner', active: 0 };
+    assignable.unshift(cur);
   }
   return assignable.map(function (u) {
     const me = state.user && String(u.id) === String(state.user.id);
@@ -1488,7 +1491,7 @@ function taskItemHtml(t) {
     '<div class="field"><label>Due date</label>' +
     '<input type="date" data-edit-due value="' + escAttr(dd || '') + '"></div>' +
     '<div class="field"><label>Assign to</label>' +
-    '<select data-edit-owner>' + taskAssigneeOptions(t.owner_id) + '</select></div>' +
+    '<select data-edit-owner>' + taskAssigneeOptions(t.owner_id, t.ownerName) + '</select></div>' +
     '<button class="btn small" data-edit-save>Save</button>' +
     '<button class="btn ghost small" data-edit-cancel>Cancel</button>' +
     '</div>' +
