@@ -369,13 +369,31 @@ const GOOGLE_TASK_COLUMNS = [
   }
 }
 
-// Activities gain a call duration (seconds) for auto-logged Twilio calls.
+// Activities gain a call duration (seconds) for auto-logged Twilio calls,
+// plus read_at for "unlistened voicemail" tracking.
 {
   const existing = new Set(
     db.prepare('PRAGMA table_info(activities)').all().map((col) => col.name)
   );
   if (!existing.has('duration_sec')) {
     db.exec('ALTER TABLE activities ADD COLUMN duration_sec INTEGER');
+  }
+  if (!existing.has('read_at')) {
+    db.exec('ALTER TABLE activities ADD COLUMN read_at TEXT');
+  }
+}
+
+// RVM recordings gain direction (outbound clip vs inbound voicemail) + the
+// Twilio recording SID (to match async transcriptions).
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(rvm_recordings)').all().map((col) => col.name)
+  );
+  if (!existing.has('direction')) {
+    db.exec("ALTER TABLE rvm_recordings ADD COLUMN direction TEXT NOT NULL DEFAULT 'outbound'");
+  }
+  if (!existing.has('twilio_sid')) {
+    db.exec('ALTER TABLE rvm_recordings ADD COLUMN twilio_sid TEXT');
   }
 }
 
