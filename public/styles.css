@@ -460,3 +460,45 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 .vm-badge{ background:#ff2d78; border-color:#ff2d78; color:#fff; font-weight:700; }
 .vm-badge:hover{ background:#ff4f8f; border-color:#ff4f8f; }
 .vm-badge.hidden{ display:none; }
+
+/* Unread inbound activity row highlight */
+.logitem.unread{ box-shadow:inset 3px 0 0 #ff2d78; }
+
+/* ------------------------------ Mobile / PWA ------------------------------ */
+/* Respect iOS safe areas (notch) when installed. */
+body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-bottom); }
+
+@media (max-width: 720px) {
+  .topbar{ flex-wrap:wrap; gap:8px; padding:8px 10px; position:sticky; top:0; z-index:50; }
+  .topbar .logo{ font-size:16px; }
+  .topbar .spacer{ display:none; }
+  .who{ font-size:11px; max-width:45%; overflow:hidden; }
+  /* Tab bar scrolls horizontally instead of overflowing */
+  .tabs{ order:10; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; white-space:nowrap; display:flex; gap:4px; }
+  .tabs button{ flex:0 0 auto; }
+
+  main{ padding:10px; }
+  .viewhead{ flex-wrap:wrap; gap:8px; }
+  .viewhead h2{ width:100%; }
+
+  /* Pipeline: swipeable columns */
+  .board{ display:flex; gap:12px; overflow-x:auto; -webkit-overflow-scrolling:touch; scroll-snap-type:x mandatory; }
+  .board .col{ flex:0 0 82%; scroll-snap-align:start; }
+
+  /* Filters + search stack full-width */
+  .filterbar{ flex-direction:column; align-items:stretch; }
+  .filterbar .search, .filterbar select{ width:100%; }
+
+  /* Modal takes the whole screen */
+  .overlay{ padding:0; }
+  .modal{ width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  .grid2, .grid3{ grid-template-columns:1fr; }
+
+  /* Tables scroll horizontally */
+  .tablewrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+
+  /* Bigger tap targets */
+  .btn{ padding:10px 12px; }
+  .btn.small{ padding:8px 10px; }
+  .callbtn{ width:34px; height:34px; }
+}

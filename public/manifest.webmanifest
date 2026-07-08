@@ -1,0 +1,16 @@
+{
+  "name": "RenewEQ REI CRM",
+  "short_name": "RenewEQ",
+  "description": "Wholesale real estate CRM — pipeline, calls, texts, ringless voicemail, tasks, and documents.",
+  "start_url": "/?src=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b1020",
+  "theme_color": "#111730",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

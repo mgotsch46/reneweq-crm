@@ -251,10 +251,12 @@ async function bootApp() {
   await refreshContacts().catch(toastErr);
   switchTab('pipeline');
 
-  // Unlistened-voicemail alert badge (poll every 45s).
+  // Unread calls/texts/voicemails alert badge (poll every 45s) + push.
   setupVoicemailBadge();
   refreshVoicemailBadge();
   if (!state._vmPoll) state._vmPoll = setInterval(refreshVoicemailBadge, 45000);
+  registerServiceWorker();
+  setupPush();
 }
 
 function isAdmin() { return state.user && state.user.role === 'admin'; }
@@ -1321,7 +1323,9 @@ function openContactModal(contact, leadDraft) {
       : '<p class="hint" style="margin:0 0 10px">Upload contracts, photos, or any file for this contact (up to 25&nbsp;MB each).</p>' +
         '<div class="actions-row">' +
         '  <input type="file" id="docFile" style="display:none">' +
+        '  <input type="file" id="docCamera" accept="image/*" capture="environment" style="display:none">' +
         '  <button class="btn small" id="docPick" type="button">Choose file…</button>' +
+        '  <button class="btn small" id="docScan" type="button">📷 Scan / Photo</button>' +
         '  <span class="hint" id="docPickName" style="align-self:center"></span>' +
         '  <button class="btn blue small" id="docUpload" type="button" disabled>Upload</button>' +
         '</div>' +
@@ -1693,13 +1697,16 @@ function setupVoicemailBadge() {
 
 async function refreshVoicemailBadge() {
   const b = document.getElementById('vmBadge');
-  if (!b) return;
   try {
-    const r = await api('GET', '/voicemails/unread');
+    const r = await api('GET', '/inbox/unread');
     state._vmUnread = (r && r.items) ? r.items : [];
     const n = (r && r.count) ? r.count : 0;
-    if (n > 0) { b.textContent = '🎙 ' + n + ' new voicemail' + (n > 1 ? 's' : ''); b.classList.remove('hidden'); }
-    else { b.classList.add('hidden'); }
+    if (b) {
+      if (n > 0) { b.textContent = '🔔 ' + n + ' new'; b.classList.remove('hidden'); }
+      else { b.classList.add('hidden'); }
+    }
+    // Update the installed-app icon badge (Android + iOS 16.4+ installed PWA).
+    try { if (navigator.setAppBadge) { n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge(); } } catch (e) {}
   } catch (e) { /* ignore */ }
 }
 
@@ -1710,7 +1717,68 @@ async function openMostRecentUnreadVm() {
   let c = state.contacts.find(function (x) { return String(x.id) === String(vm.contact_id); });
   if (!c) { try { c = await api('GET', '/contacts/' + encodeURIComponent(vm.contact_id)); } catch (e) {} }
   if (c) openContactModal(c);
-  else toast('Open the contact to hear the voicemail.', 'error');
+  else toast('Open the contact.', 'error');
+}
+
+/* ---- PWA: service worker + web push notifications ---- */
+
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/sw.js').catch(function (e) { console.warn('[pwa] SW registration failed:', e && e.message); });
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+async function subscribeForPush(vapidKey) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidKey),
+    });
+  }
+  await api('POST', '/push/subscribe', { subscription: sub.toJSON ? sub.toJSON() : sub });
+  return true;
+}
+
+/** After login: if push is available, subscribe (or offer an "Enable alerts" button). */
+async function setupPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+  let key = null;
+  try { const r = await api('GET', '/push/key'); key = r && r.key; } catch (e) {}
+  if (!key) return; // push not configured on the server yet
+  if (Notification.permission === 'granted') {
+    subscribeForPush(key).catch(function () {});
+    return;
+  }
+  if (Notification.permission === 'denied') return;
+  // Offer an opt-in button in the top bar.
+  const topbar = document.querySelector('.topbar');
+  const who = document.getElementById('whoBox');
+  if (!topbar || !who || document.getElementById('enableAlertsBtn')) return;
+  const b = document.createElement('button');
+  b.id = 'enableAlertsBtn';
+  b.className = 'btn ghost small';
+  b.textContent = '🔔 Enable alerts';
+  b.addEventListener('click', async function () {
+    const perm = await Notification.requestPermission();
+    if (perm === 'granted') {
+      try { await subscribeForPush(key); toast('Notifications enabled.', 'ok'); b.remove(); }
+      catch (e) { toastErr(e); }
+    } else {
+      toast('Notifications not enabled.', 'error');
+    }
+  });
+  topbar.insertBefore(b, who);
 }
 
 async function loadActivities(contactId) {
@@ -1730,19 +1798,25 @@ async function loadActivities(contactId) {
       if (a.direction) extra.push(esc(a.direction));
       if (a.status) extra.push(esc(a.status));
       if (type === 'call' && a.duration_sec) extra.push(fmtDur(a.duration_sec));
-      // Inbound voicemail: playable + unread badge.
+      // New-vs-viewed applies to any INBOUND text / call / voicemail.
+      const isInbound = a.direction === 'inbound' && ['sms', 'call', 'rvm'].indexOf(type) !== -1;
+      const isUnread = isInbound && !a.read_at;
+      const newBadge = isUnread ? ' <span class="tag warn">NEW</span>' : '';
       const isVm = type === 'rvm' && a.direction === 'inbound';
-      const newBadge = (isVm && !a.read_at) ? ' <span class="tag warn">NEW</span>' : '';
       const playBtn = (isVm && a.provider_id)
         ? ' <button class="btn ghost small" data-vmplay="' + escAttr(a.provider_id) + '" data-vmact="' + escAttr(a.id) + '">▶ Play</button>'
         : '';
-      return '<div class="logitem">' +
+      const toggleBtn = isInbound
+        ? ' <button class="btn ghost small" data-toggleread="' + escAttr(a.id) + '" data-read="' + (a.read_at ? '1' : '0') + '">' +
+          (a.read_at ? 'Mark new' : 'Mark viewed') + '</button>'
+        : '';
+      return '<div class="logitem' + (isUnread ? ' unread' : '') + '">' +
         '<div class="lh">' +
         '<span><span class="typechip ' + chipClass + '">' + esc(type.toUpperCase()) + '</span>' + newBadge +
         (extra.length ? ' <span>' + extra.join(' &middot; ') + '</span>' : '') + '</span>' +
         '<span>' + esc(fmtTimestamp(a.created_at)) + (a.created_by ? ' &middot; ' + esc(a.created_by) : '') + '</span>' +
         '</div>' +
-        '<div>' + esc(a.body || '') + playBtn + '</div>' +
+        '<div>' + esc(a.body || '') + playBtn + toggleBtn + '</div>' +
         '</div>';
     }).join('');
     box.scrollTop = box.scrollHeight;
@@ -1756,6 +1830,18 @@ async function loadActivities(contactId) {
           loadActivities(contactId);
           refreshVoicemailBadge();
         } catch (e) {}
+      });
+    });
+
+    // Wire new-vs-viewed toggles (mark viewed / bump back to NEW).
+    $all('[data-toggleread]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        const wasRead = b.getAttribute('data-read') === '1';
+        try {
+          await api('POST', '/activities/' + encodeURIComponent(b.getAttribute('data-toggleread')) + '/read', { read: !wasRead });
+          loadActivities(contactId);
+          refreshVoicemailBadge();
+        } catch (e) { toastErr(e); }
       });
     });
   } catch (e) {
@@ -2048,36 +2134,47 @@ function fmtBytes(n) {
 /** Wire the Documents section: file picker, upload, and load the list. */
 function wireDocuments(contactId, overlay) {
   const pick = $('#docPick', overlay);
+  const scan = $('#docScan', overlay);
   const fileInput = $('#docFile', overlay);
+  const camInput = $('#docCamera', overlay);
   const nameEl = $('#docPickName', overlay);
   const uploadBtn = $('#docUpload', overlay);
   if (!fileInput || !uploadBtn) return; // isNew contact: no documents UI
 
-  if (pick) pick.addEventListener('click', function () { fileInput.click(); });
-  fileInput.addEventListener('change', function () {
-    const f = fileInput.files && fileInput.files[0];
-    if (!f) { nameEl.textContent = ''; uploadBtn.disabled = true; return; }
+  let pendingFile = null;
+  function choose(f, isScan) {
+    if (!f) { pendingFile = null; nameEl.textContent = ''; uploadBtn.disabled = true; return; }
     if (f.size > DOC_MAX_BYTES) {
       toast('That file is larger than 25 MB.', 'error');
-      fileInput.value = ''; nameEl.textContent = ''; uploadBtn.disabled = true; return;
+      pendingFile = null; nameEl.textContent = ''; uploadBtn.disabled = true; return;
     }
-    nameEl.textContent = f.name + ' (' + fmtBytes(f.size) + ')';
+    // Camera captures come in as generic "image.jpg" — give a friendlier name.
+    let name = f.name || 'file';
+    if (isScan && (!f.name || /^image\.(jpe?g|png)$/i.test(f.name))) {
+      name = 'Scan ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + '.jpg';
+    }
+    pendingFile = { blob: f, name: name };
+    nameEl.textContent = name + ' (' + fmtBytes(f.size) + ')';
     uploadBtn.disabled = false;
-  });
+  }
+
+  if (pick) pick.addEventListener('click', function () { fileInput.click(); });
+  if (scan && camInput) scan.addEventListener('click', function () { camInput.click(); });
+  fileInput.addEventListener('change', function () { choose(fileInput.files && fileInput.files[0], false); });
+  if (camInput) camInput.addEventListener('change', function () { choose(camInput.files && camInput.files[0], true); });
 
   uploadBtn.addEventListener('click', async function () {
-    const f = fileInput.files && fileInput.files[0];
-    if (!f) { toast('Choose a file first.', 'error'); return; }
+    if (!pendingFile) { toast('Choose or scan a file first.', 'error'); return; }
     uploadBtn.disabled = true;
     const prev = uploadBtn.textContent;
     uploadBtn.textContent = 'Uploading…';
     try {
-      const dataBase64 = await fileToBase64(f);
+      const dataBase64 = await fileToBase64(pendingFile.blob);
       await api('POST', '/contacts/' + encodeURIComponent(contactId) + '/documents', {
-        filename: f.name, mime: f.type || null, dataBase64: dataBase64,
+        filename: pendingFile.name, mime: pendingFile.blob.type || null, dataBase64: dataBase64,
       });
-      toast('Uploaded ' + f.name, 'ok');
-      fileInput.value = ''; nameEl.textContent = '';
+      toast('Uploaded ' + pendingFile.name, 'ok');
+      pendingFile = null; fileInput.value = ''; if (camInput) camInput.value = ''; nameEl.textContent = '';
       loadDocuments(contactId, overlay);
     } catch (e) {
       toastErr(e);
