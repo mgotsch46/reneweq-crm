@@ -2898,6 +2898,21 @@ function renderSettings() {
     '(<code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM_NUMBER</code>) in the server’s ' +
     '<code>.env</code> file. Once those are set and the number’s A2P campaign is approved, the server switches to live mode automatically. ' +
     'Manual tap-to-text, tap-to-call, and email links in the contact modal work from your own device without any of that setup.</p>' +
+    (isAdmin()
+      ? '<h3 style="margin-top:18px">Voicemail Greeting</h3>' +
+        '<p class="hint">What callers hear when a call to your number goes to voicemail. Type a greeting (spoken by the system) and/or record your own voice — a recording, if present, is used instead of the text.</p>' +
+        '<div class="field"><label>Greeting text</label>' +
+        '<textarea id="vmGreetText" rows="2" placeholder="You\'ve reached RenewEQ. Please leave a message after the tone, then hang up."></textarea></div>' +
+        '<div class="actions-row"><button class="btn small" id="vmGreetSave">Save text</button></div>' +
+        '<div class="rvmrec" style="margin-top:10px">' +
+        '  <button type="button" class="btn small" id="vmGreetRec">● Record greeting</button>' +
+        '  <button type="button" class="btn ghost small" id="vmGreetStop" disabled>■ Stop</button>' +
+        '  <span class="hint" id="vmGreetStatus"></span>' +
+        '  <audio id="vmGreetPreview" controls style="display:none;max-width:220px;height:34px;vertical-align:middle"></audio>' +
+        '  <button type="button" class="btn small" id="vmGreetSaveRec" disabled>Save recording</button>' +
+        '</div>' +
+        '<div id="vmGreetCurrent" class="doclist"></div>'
+      : '') +
     '<h3 style="margin-top:18px">Google Tasks &amp; Calendar</h3>' +
     '<div id="googleBox"><p class="hint">Checking Google status…</p></div>' +
     '<h3 style="margin-top:18px">Microsoft To Do &amp; Outlook Calendar</h3>' +
@@ -2912,6 +2927,88 @@ function renderSettings() {
   refreshGoogleStatus().then(renderGoogleBox); // ...then re-check the server
   renderMicrosoftBox();
   refreshMicrosoftStatus().then(renderMicrosoftBox);
+  if (isAdmin()) wireVmGreeting();
+}
+
+/** Settings → Voicemail Greeting: text + recorded voice greeting. */
+function wireVmGreeting() {
+  const textEl = $('#vmGreetText');
+  if (!textEl) return;
+  const saveText = $('#vmGreetSave');
+  const recBtn = $('#vmGreetRec'), stopBtn = $('#vmGreetStop'), saveRec = $('#vmGreetSaveRec');
+  const statusEl = $('#vmGreetStatus'), preview = $('#vmGreetPreview'), curBox = $('#vmGreetCurrent');
+  let mediaRecorder = null, chunks = [], recordedB64 = null, recUrl = null, startTs = 0, durMs = 0, timer = null;
+
+  async function refresh() {
+    try {
+      const g = await api('GET', '/settings/vm-greeting');
+      textEl.value = g.text || '';
+      if (curBox) {
+        curBox.innerHTML = g.hasAudio
+          ? '<div class="docitem"><span class="docname">🔊 Recorded voice greeting (in use)</span>' +
+            '<span class="docacts">' +
+            '<button class="btn ghost small" id="vmGreetPlay">Play</button>' +
+            '<button class="btn ghost small danger" id="vmGreetDel">Remove</button></span></div>'
+          : '<p class="hint">No voice greeting recorded — the text above is spoken to callers.</p>';
+        const play = $('#vmGreetPlay'); if (play) play.onclick = function () { playRecording(g.recordingId); };
+        const del = $('#vmGreetDel'); if (del) del.onclick = async function () {
+          if (!window.confirm('Remove the recorded greeting? Callers will hear the text instead.')) return;
+          try { await api('DELETE', '/settings/vm-greeting/recording'); toast('Greeting recording removed', 'ok'); refresh(); }
+          catch (e) { toastErr(e); }
+        };
+      }
+    } catch (e) {}
+  }
+
+  if (saveText) saveText.addEventListener('click', async function () {
+    try { await api('POST', '/settings/vm-greeting', { text: textEl.value }); toast('Greeting text saved', 'ok'); }
+    catch (e) { toastErr(e); }
+  });
+
+  if (recBtn) recBtn.addEventListener('click', async function () {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Recording not supported here.', 'error'); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.onstop = async function () {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+        clearInterval(timer); durMs = Date.now() - startTs;
+        const blob = new Blob(chunks, { type: chunks[0] ? chunks[0].type : 'audio/webm' });
+        statusEl.textContent = 'Processing…';
+        try {
+          const wav = await blobToWav(blob);
+          recordedB64 = await fileToBase64(wav);
+          if (recUrl) URL.revokeObjectURL(recUrl);
+          recUrl = URL.createObjectURL(wav); preview.src = recUrl; preview.style.display = 'inline-block';
+          saveRec.disabled = false; statusEl.textContent = 'Recorded ' + fmtDur(Math.round(durMs / 1000)) + ' — preview, then Save.';
+        } catch (e) { toast('Could not process recording.', 'error'); statusEl.textContent = ''; }
+      };
+      mediaRecorder.start(); startTs = Date.now();
+      recBtn.disabled = true; stopBtn.disabled = false; saveRec.disabled = true;
+      statusEl.textContent = 'Recording… 0:00';
+      timer = setInterval(function () { statusEl.textContent = 'Recording… ' + fmtDur(Math.round((Date.now() - startTs) / 1000)); }, 500);
+    } catch (e) { toast('Microphone blocked or unavailable.', 'error'); }
+  });
+
+  if (stopBtn) stopBtn.addEventListener('click', function () {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    recBtn.disabled = false; stopBtn.disabled = true;
+  });
+
+  if (saveRec) saveRec.addEventListener('click', async function () {
+    if (!recordedB64) { toast('Record something first.', 'error'); return; }
+    saveRec.disabled = true;
+    try {
+      await api('POST', '/settings/vm-greeting/recording', { mime: 'audio/wav', dataBase64: recordedB64, duration_ms: durMs });
+      toast('Voice greeting saved — callers will hear it.', 'ok');
+      recordedB64 = null; preview.style.display = 'none'; statusEl.textContent = '';
+      refresh();
+    } catch (e) { toastErr(e); saveRec.disabled = false; }
+  });
+
+  refresh();
 }
 
 /* Google section of Settings — status card + Connect/Disconnect actions. */
