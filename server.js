@@ -25,11 +25,13 @@ const userRoutes = require('./routes/users');
 const leadEngineRoutes = require('./routes/leadengine');
 const googleRoutes = require('./routes/google');
 const microsoftRoutes = require('./routes/microsoft');
+const twilioRoutes = require('./routes/twilio');
 const scheduler = require('./scheduler'); // Lead Engine daily auto-import
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // Twilio webhooks post form-encoded bodies
 
 // ---------------------------------------------------------------------------
 // API routes
@@ -65,6 +67,11 @@ app.use('/api/google', googleRoutes.router);
 
 // Microsoft To Do / Outlook Calendar integration — same pattern as Google.
 app.use('/api/microsoft', microsoftRoutes.router);
+
+// Twilio softphone + SMS. Webhook routes (voice, voice-inbound, sms-inbound)
+// are hit directly by Twilio with no Bearer token; token/sms/status routes
+// apply requireAuth themselves inside routes/twilio.js.
+app.use('/api/twilio', twilioRoutes.router);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);

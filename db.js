@@ -323,6 +323,16 @@ const GOOGLE_TASK_COLUMNS = [
   }
 }
 
+// Activities gain a call duration (seconds) for auto-logged Twilio calls.
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(activities)').all().map((col) => col.name)
+  );
+  if (!existing.has('duration_sec')) {
+    db.exec('ALTER TABLE activities ADD COLUMN duration_sec INTEGER');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Settings — simple key/value store (Lead Engine auto-import config, etc.).
 // ---------------------------------------------------------------------------
