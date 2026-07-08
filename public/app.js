@@ -24,6 +24,7 @@ const state = {
   users: [],
   assignees: [], // active users for task assignment (all roles can load this)
   google: null, // {configured, connected, email} from /api/google/status
+  microsoft: null, // {configured, connected, email} from /api/microsoft/status
   tab: 'pipeline',
   contactSearch: '',
   contactList: null, // server-filtered list for the Contacts view
@@ -226,6 +227,7 @@ async function bootApp() {
     state.config = { messagingMode: 'stub' };
   }
   await refreshGoogleStatus(); // never throws
+  await refreshMicrosoftStatus(); // never throws
 
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
@@ -271,18 +273,35 @@ async function refreshGoogleStatus() {
   }
   return state.google;
 }
+async function refreshMicrosoftStatus() {
+  try {
+    state.microsoft = await api('GET', '/microsoft/status');
+  } catch (e) {
+    state.microsoft = null; // older server / fetch failure — treat as unavailable
+  }
+  return state.microsoft;
+}
 
-/* After returning from Google's consent screen the callback redirects to
-   /?google=connected or /?google=error — show a toast, then clean the URL. */
+/* After returning from a provider's consent screen the callback redirects to
+   /?google=... or /?microsoft=... — show a toast, then clean the URL. */
 function handleGoogleReturnParam() {
   let params;
   try { params = new URLSearchParams(window.location.search); }
   catch (e) { return; }
-  if (!params.has('google')) return;
-  const v = params.get('google');
-  if (v === 'connected') toast('Google account connected — tasks will sync.', 'ok');
-  else toast('Google connection failed. Please try again.', 'error');
-  params.delete('google');
+  let changed = false;
+  if (params.has('google')) {
+    const v = params.get('google');
+    if (v === 'connected') toast('Google account connected — tasks will sync.', 'ok');
+    else toast('Google connection failed. Please try again.', 'error');
+    params.delete('google'); changed = true;
+  }
+  if (params.has('microsoft')) {
+    const v = params.get('microsoft');
+    if (v === 'connected') toast('Microsoft account connected — tasks will sync.', 'ok');
+    else toast('Microsoft connection failed. Please try again.', 'error');
+    params.delete('microsoft'); changed = true;
+  }
+  if (!changed) return;
   const rest = params.toString();
   window.history.replaceState({}, '', window.location.pathname + (rest ? '?' + rest : ''));
 }
@@ -1442,6 +1461,24 @@ function renderTasks() {
         }
       });
     }
+    const pushMsBtn = $('[data-push-microsoft]', item);
+    if (pushMsBtn) {
+      pushMsBtn.addEventListener('click', async function () {
+        pushMsBtn.disabled = true;
+        const orig = pushMsBtn.textContent;
+        pushMsBtn.textContent = 'Sending...';
+        try {
+          await api('POST', '/tasks/' + encodeURIComponent(id) + '/push-microsoft');
+          await refreshTasks();
+          renderTasks();
+          toast('Task sent to Microsoft', 'ok');
+        } catch (e) {
+          toastErr(e);
+          pushMsBtn.textContent = orig;
+          pushMsBtn.disabled = false;
+        }
+      });
+    }
   });
 }
 
@@ -1503,6 +1540,14 @@ function taskItemHtml(t) {
   } else if (gConnected && !isDone) {
     googleBit = '<button class="btn ghost small" data-push-google="1" title="Push this task to Google Tasks (and Calendar if it has a due date)">Send to Google</button>';
   }
+  const msConnected = state.microsoft && state.microsoft.connected;
+  let msBit = '';
+  if (t.ms_todo_id) {
+    msBit = '<span class="tag blue" title="Synced to Microsoft To Do' +
+      (t.ms_event_id ? ' + Outlook Calendar' : '') + '">Microsoft &#10003;</span>';
+  } else if (msConnected && !isDone) {
+    msBit = '<button class="btn ghost small" data-push-microsoft="1" title="Push this task to Microsoft To Do (and Outlook Calendar if it has a due date)">Send to Microsoft</button>';
+  }
   return '<div class="taskitem' + (isDone ? ' done' : '') + '" data-id="' + escAttr(t.id) + '">' +
     '<input type="checkbox"' + (isDone ? ' checked' : '') + ' title="Toggle done">' +
     '<span class="tt">' + esc(t.title || '') +
@@ -1514,6 +1559,7 @@ function taskItemHtml(t) {
         (t.duration_min ? ' <span class="tag grey">' + esc(String(t.duration_min)) + 'm</span>' : '') : '') +
       '</span>' : '') +
     googleBit +
+    msBit +
     '<button class="btn ghost small" data-edit="1">Edit</button>' +
     '<button class="btn ghost small" data-del="1">Delete</button>' +
     // Hidden inline editor: title, due date, time, duration, assignee.
@@ -1624,6 +1670,21 @@ function wireContactTaskItems(box, contactId, overlay) {
         toastErr(e);
         pushBtn.textContent = orig;
         pushBtn.disabled = false;
+      }
+    });
+    const pushMsBtn = $('[data-push-microsoft]', item);
+    if (pushMsBtn) pushMsBtn.addEventListener('click', async function () {
+      pushMsBtn.disabled = true;
+      const orig = pushMsBtn.textContent;
+      pushMsBtn.textContent = 'Sending...';
+      try {
+        await api('POST', '/tasks/' + encodeURIComponent(id) + '/push-microsoft');
+        toast('Task sent to Microsoft', 'ok');
+        await loadContactTasks(contactId, overlay);
+      } catch (e) {
+        toastErr(e);
+        pushMsBtn.textContent = orig;
+        pushMsBtn.disabled = false;
       }
     });
   });
@@ -1924,6 +1985,9 @@ function renderSettings() {
     'Manual tap-to-text, tap-to-call, and email links in the contact modal work from your own device without any of that setup.</p>' +
     '<h3 style="margin-top:18px">Google Tasks &amp; Calendar</h3>' +
     '<div id="googleBox"><p class="hint">Checking Google status…</p></div>' +
+    '<h3 style="margin-top:18px">Microsoft To Do &amp; Outlook Calendar</h3>' +
+    '<div id="microsoftBox"><p class="hint">Checking Microsoft status…</p></div>' +
+    '<p class="hint" style="margin-top:8px;opacity:.75">You can connect Google, Microsoft, or both — each person on the team chooses their own. Tasks you own sync to whichever you connect.</p>' +
     '<h3 style="margin-top:18px">Account</h3>' +
     '<div class="kv"><b>Signed in as:</b> ' + esc(state.user ? state.user.name : '') + ' (' + esc(state.user ? state.user.email : '') + ')</div>' +
     '<div class="kv"><b>Role:</b> ' + esc(state.user ? state.user.role : '') + '</div>' +
@@ -1931,6 +1995,8 @@ function renderSettings() {
 
   renderGoogleBox(); // render from cached status immediately...
   refreshGoogleStatus().then(renderGoogleBox); // ...then re-check the server
+  renderMicrosoftBox();
+  refreshMicrosoftStatus().then(renderMicrosoftBox);
 }
 
 /* Google section of Settings — status card + Connect/Disconnect actions. */
@@ -1977,6 +2043,57 @@ function renderGoogleBox() {
       toast('Google account disconnected', 'ok');
       await refreshGoogleStatus();
       renderGoogleBox();
+    } catch (e) {
+      toastErr(e);
+      btn.disabled = false;
+    }
+  });
+}
+
+/* Microsoft section of Settings — status card + Connect/Disconnect actions. */
+function renderMicrosoftBox() {
+  const box = $('#microsoftBox');
+  if (!box) return;
+
+  const m = state.microsoft;
+  if (!m || !m.configured) {
+    box.innerHTML = '<p class="hint" style="opacity:.7">Microsoft integration not configured yet. ' +
+      'Once <code>MS_CLIENT_ID</code> and <code>MS_CLIENT_SECRET</code> are set on the server, ' +
+      'you can connect your Microsoft account here to sync CRM tasks to Microsoft To Do and Outlook Calendar.</p>';
+    return;
+  }
+
+  if (!m.connected) {
+    box.innerHTML = '<p class="hint">Connect your Microsoft account and every new CRM task is added to ' +
+      'Microsoft To Do — tasks with a due date also become an Outlook Calendar event (timed if you set a time).</p>' +
+      '<div class="actions-row"><button class="btn" id="msConnect">Connect Microsoft</button></div>';
+    $('#msConnect').addEventListener('click', async function () {
+      const btn = this;
+      btn.disabled = true;
+      try {
+        const out = await api('GET', '/microsoft/auth') || {};
+        if (!out.url) throw new Error('Could not start Microsoft sign-in.');
+        window.location = out.url; // off to Microsoft's consent screen
+      } catch (e) {
+        toastErr(e);
+        btn.disabled = false;
+      }
+    });
+    return;
+  }
+
+  box.innerHTML = '<div class="kv"><b>Connected as:</b> ' + esc(m.email || 'Microsoft account') +
+    ' <span class="pill sent"><input type="checkbox" disabled checked> Syncing</span></div>' +
+    '<p class="hint" style="margin:6px 0 10px">New tasks are pushed to Microsoft To Do; tasks with a due date also get an Outlook Calendar event.</p>' +
+    '<div class="actions-row"><button class="btn ghost small" id="msDisconnect">Disconnect</button></div>';
+  $('#msDisconnect').addEventListener('click', async function () {
+    const btn = this;
+    btn.disabled = true;
+    try {
+      await api('POST', '/microsoft/disconnect');
+      toast('Microsoft account disconnected', 'ok');
+      await refreshMicrosoftStatus();
+      renderMicrosoftBox();
     } catch (e) {
       toastErr(e);
       btn.disabled = false;
