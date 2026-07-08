@@ -24,7 +24,7 @@ const path = require('path');
 const { db, uid, now, DATA_DIR, DEFAULT_RVM } = require('../db');
 const { requireAuth } = require('../auth');
 const { isAdmin, renderTemplate } = require('./helpers');
-const { sendRvm } = require('../integrations');
+const { sendRvm, rvmMode, rvmProvider } = require('../integrations');
 
 const router = express.Router();
 
@@ -70,6 +70,11 @@ function recPublic(r) {
   return { id: r.id, label: r.label, mime: r.mime, size: r.size, duration_ms: r.duration_ms, created_at: r.created_at };
 }
 function truthy(v) { return v === 1 || v === true || v === '1' || v === 'true'; }
+
+/** GET /api/rvm/status — is RVM delivery live, and via which provider? */
+router.get('/rvm/status', requireAuth, (req, res) => {
+  res.json({ mode: rvmMode(), provider: rvmProvider(), baseUrl: appBaseUrl(req) });
+});
 
 // ---------------------------------------------------------------------------
 // Recordings
