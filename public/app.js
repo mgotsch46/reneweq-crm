@@ -956,6 +956,8 @@ function openContactModal(contact, leadDraft) {
         '<div class="taskform">' +
         '  <div class="field" style="flex:2"><label>New task</label><input id="ctTaskTitle" type="text" placeholder="e.g. Follow up with seller"></div>' +
         '  <div class="field"><label>Due date</label><input id="ctTaskDue" type="date"></div>' +
+        '  <div class="field"><label>Time (optional)</label><input id="ctTaskTime" type="time"></div>' +
+        '  <div class="field"><label>Duration</label><select id="ctTaskDur">' + durationOptions(30) + '</select></div>' +
         '  <button class="btn" id="ctTaskAdd" type="button">Add Task</button>' +
         '</div>' +
         '<div class="tasklist" id="contactTasks"><p class="hint">Loading tasks...</p></div>') +
@@ -1077,13 +1079,17 @@ function openContactModal(contact, leadDraft) {
       const title = titleEl.value.trim();
       if (!title) { toast('Enter a task title.', 'error'); return; }
       const dueEl = $('#ctTaskDue', overlay);
+      const timeEl = $('#ctTaskTime', overlay);
+      const durEl = $('#ctTaskDur', overlay);
       const body = { title: title, contact_id: c.id };
       if (dueEl && dueEl.value) body.due_date = dueEl.value;
+      if (timeEl && timeEl.value) { body.due_time = timeEl.value; body.duration_min = Number(durEl && durEl.value) || 30; }
       ctAdd.disabled = true;
       try {
         await api('POST', '/tasks', body);
         titleEl.value = '';
         if (dueEl) dueEl.value = '';
+        if (timeEl) timeEl.value = '';
         toast('Task added', 'ok');
         await loadContactTasks(c.id, overlay);
       } catch (e) { toastErr(e); }
@@ -1356,6 +1362,8 @@ function renderTasks() {
     '<div class="taskform">' +
     '  <div class="field" style="flex:2"><label>New task (no contact)</label><input id="taskTitle" type="text" placeholder="e.g. Order more yard signs"></div>' +
     '  <div class="field"><label>Due date</label><input id="taskDue" type="date"></div>' +
+    '  <div class="field"><label>Time (optional)</label><input id="taskTime" type="time"></div>' +
+    '  <div class="field"><label>Duration</label><select id="taskDur">' + durationOptions(30) + '</select></div>' +
     '  <button class="btn" id="taskAdd">Add Task</button>' +
     '</div>';
 
@@ -1376,6 +1384,8 @@ function renderTasks() {
     const body = { title: title };
     const due = $('#taskDue').value;
     if (due) body.due_date = due;
+    const time = $('#taskTime').value;
+    if (time) { body.due_time = time; body.duration_min = Number($('#taskDur').value) || 30; }
     try {
       await api('POST', '/tasks', body);
       await refreshTasks();
@@ -1435,6 +1445,25 @@ function renderTasks() {
   });
 }
 
+/** <option> list of task durations, `selected` (minutes) marked (default 30). */
+function durationOptions(selected) {
+  const opts = [[15, '15 min'], [30, '30 min'], [45, '45 min'], [60, '1 hour'], [90, '1.5 hours'], [120, '2 hours'], [180, '3 hours']];
+  const sel = selected ? String(selected) : '30';
+  return opts.map(function (o) {
+    return '<option value="' + o[0] + '"' + (String(o[0]) === sel ? ' selected' : '') + '>' + o[1] + '</option>';
+  }).join('');
+}
+
+/** Human-readable "2:00 PM" from an HH:MM 24h string (empty → ''). */
+function fmtTime(hhmm) {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return '';
+  let h = parseInt(m[1], 10);
+  const ap = h < 12 ? 'AM' : 'PM';
+  h = h % 12; if (h === 0) h = 12;
+  return h + ':' + m[2] + ' ' + ap;
+}
+
 /** <option> list of ACTIVE users for assigning a task, current owner selected.
  *  If the task's current owner is inactive, keep them (labeled) so reassignment
  *  choices never silently drop the existing assignment. */
@@ -1480,16 +1509,23 @@ function taskItemHtml(t) {
     (t.ownerName ? ' <span class="tag grey" title="Assigned to">' + esc(t.ownerName) + '</span>' : '') +
     '</span>' +
     (contact ? '<button class="linklike" data-contact-link="' + escAttr(contact.id) + '">' + esc(contact.name || 'contact') + '</button>' : '') +
-    (dd ? '<span class="due' + (overdue ? ' overdue' : '') + '">due ' + esc(dd) + '</span>' : '') +
+    (dd ? '<span class="due' + (overdue ? ' overdue' : '') + '">due ' + esc(dd) +
+      (t.due_time ? ' ' + esc(fmtTime(t.due_time)) +
+        (t.duration_min ? ' <span class="tag grey">' + esc(String(t.duration_min)) + 'm</span>' : '') : '') +
+      '</span>' : '') +
     googleBit +
     '<button class="btn ghost small" data-edit="1">Edit</button>' +
     '<button class="btn ghost small" data-del="1">Delete</button>' +
-    // Hidden inline editor: title, due date, assignee (active users).
+    // Hidden inline editor: title, due date, time, duration, assignee.
     '<div class="taskform taskedit" data-edit-panel style="display:none;flex-basis:100%;margin-top:8px">' +
     '<div class="field" style="flex:2"><label>Task</label>' +
     '<input type="text" data-edit-title value="' + escAttr(t.title || '') + '"></div>' +
     '<div class="field"><label>Due date</label>' +
     '<input type="date" data-edit-due value="' + escAttr(dd || '') + '"></div>' +
+    '<div class="field"><label>Time</label>' +
+    '<input type="time" data-edit-time value="' + escAttr(t.due_time || '') + '"></div>' +
+    '<div class="field"><label>Duration</label>' +
+    '<select data-edit-dur>' + durationOptions(t.duration_min || 30) + '</select></div>' +
     '<div class="field"><label>Assign to</label>' +
     '<select data-edit-owner>' + taskAssigneeOptions(t.owner_id, t.ownerName) + '</select></div>' +
     '<button class="btn small" data-edit-save>Save</button>' +
@@ -1515,9 +1551,14 @@ function wireTaskEditing(item, reload) {
   if (save) save.addEventListener('click', async function () {
     const title = $('[data-edit-title]', item).value.trim();
     if (!title) { toast('Task title cannot be empty.', 'error'); return; }
+    const timeEl = $('[data-edit-time]', item);
+    const durEl = $('[data-edit-dur]', item);
+    const hasTime = timeEl && timeEl.value;
     const body = {
       title: title,
       due_date: $('[data-edit-due]', item).value || null,
+      due_time: hasTime ? timeEl.value : null,
+      duration_min: hasTime ? (Number(durEl && durEl.value) || 30) : null,
       owner_id: $('[data-edit-owner]', item).value,
     };
     save.disabled = true;
