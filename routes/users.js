@@ -73,6 +73,17 @@ router.patch('/:id', (req, res) => {
   }
   if ('active' in body) { sets.push('active = @active'); params.active = body.active ? 1 : 0; }
   if ('name' in body) { sets.push('name = @name'); params.name = String(body.name); }
+  if ('email' in body) {
+    const normEmail = String(body.email || '').trim().toLowerCase();
+    if (!normEmail) return res.status(400).json({ error: 'Email cannot be empty' });
+    const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(normEmail, target.id);
+    if (clash) return res.status(409).json({ error: 'Email already in use by another user' });
+    sets.push('email = @email'); params.email = normEmail;
+  }
+  if ('password' in body && body.password) {
+    sets.push('password_hash = @password_hash');
+    params.password_hash = bcrypt.hashSync(String(body.password), 10);
+  }
   if ('business_number' in body) {
     sets.push('business_number = @business_number');
     params.business_number = body.business_number || null;
@@ -89,6 +100,38 @@ router.patch('/:id', (req, res) => {
     'SELECT id, name, email, role, business_number, active, created_at FROM users WHERE id = ?'
   ).get(target.id);
   res.json(updated);
+});
+
+/**
+ * DELETE /api/users/:id — permanently remove a user. To avoid losing data, the
+ * user's contacts, tasks and activity are reassigned to the requesting admin,
+ * and their Google/Microsoft tokens are cleared, before the row is deleted.
+ * Guards: cannot delete your own account or the only remaining admin.
+ */
+router.delete('/:id', (req, res) => {
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.id === req.user.id) {
+    return res.status(400).json({ error: 'Cannot delete your own account' });
+  }
+  if (target.role === 'admin') {
+    const admins = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n;
+    if (admins <= 1) return res.status(400).json({ error: 'Cannot delete the only admin account' });
+  }
+
+  const newOwner = req.user.id; // reassign everything the user owns to the requester
+  try {
+    db.prepare('UPDATE contacts   SET owner_id = ? WHERE owner_id = ?').run(newOwner, target.id);
+    db.prepare('UPDATE tasks      SET owner_id = ? WHERE owner_id = ?').run(newOwner, target.id);
+    db.prepare('UPDATE activities SET owner_id = ? WHERE owner_id = ?').run(newOwner, target.id);
+    db.prepare('DELETE FROM google_accounts    WHERE user_id = ?').run(target.id);
+    db.prepare('DELETE FROM microsoft_accounts WHERE user_id = ?').run(target.id);
+    db.prepare('UPDATE settings SET value = NULL WHERE value = ?').run(target.id); // e.g. lead auto-assign
+    db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not delete user: ' + e.message });
+  }
+  res.json({ ok: true, deleted: target.id, reassignedTo: newOwner });
 });
 
 module.exports = router;
