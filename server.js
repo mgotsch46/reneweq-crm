@@ -28,6 +28,7 @@ const microsoftRoutes = require('./routes/microsoft');
 const twilioRoutes = require('./routes/twilio');
 const documentRoutes = require('./routes/documents');
 const rvmRoutes = require('./routes/rvm');
+const pushRoutes = require('./routes/push');
 const scheduler = require('./scheduler'); // Lead Engine daily auto-import + RVM ticker
 
 const app = express();
@@ -84,6 +85,9 @@ app.use('/api', documentRoutes);
 // (/rvm/recordings/:id/public) is intentionally unauthenticated so the RVM
 // provider can fetch the clip; all other routes apply requireAuth themselves.
 app.use('/api', rvmRoutes);
+
+// PWA web-push subscriptions + notifications.
+app.use('/api/push', pushRoutes);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);

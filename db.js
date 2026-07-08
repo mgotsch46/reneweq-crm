@@ -210,8 +210,18 @@ CREATE INDEX IF NOT EXISTS idx_contacts_owner   ON contacts(owner_id);
 CREATE INDEX IF NOT EXISTS idx_activities_contact ON activities(contact_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner      ON tasks(owner_id);
 CREATE INDEX IF NOT EXISTS idx_documents_contact ON documents(contact_id);
+-- Web Push subscriptions (PWA push notifications), one row per device.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  endpoint   TEXT NOT NULL UNIQUE,
+  sub        TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_rvmrec_contact ON rvm_recordings(contact_id);
 CREATE INDEX IF NOT EXISTS idx_schedrvm_due ON scheduled_rvms(status, send_at);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 `);
 
 // ---------------------------------------------------------------------------
