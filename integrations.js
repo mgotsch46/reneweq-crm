@@ -21,9 +21,31 @@ function twilioConfigured() {
   );
 }
 
-/** True when an RVM provider key is present. */
+/** Which ringless-voicemail provider to use. */
+function rvmProvider() {
+  return String(process.env.RVM_PROVIDER || 'slybroadcast').toLowerCase();
+}
+
+/** True when the selected RVM provider has credentials configured. */
 function rvmConfigured() {
-  return Boolean(process.env.RVM_API_KEY);
+  if (process.env.RVM_API_KEY) return true; // back-compat generic key
+  if (rvmProvider() === 'dropcowboy') {
+    return Boolean(process.env.DROP_COWBOY_TEAM_ID && (process.env.DROP_COWBOY_SECRET || process.env.RVM_API_KEY));
+  }
+  // default: slybroadcast
+  return Boolean(process.env.SLYBROADCAST_EMAIL && process.env.SLYBROADCAST_PASSWORD);
+}
+
+/** 'live' if an RVM provider is configured, else 'stub'. */
+function rvmMode() {
+  return rvmConfigured() ? 'live' : 'stub';
+}
+
+/** Format a JS Date for Slybroadcast's c_date field (its server timezone). */
+function slyDate(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 /** 'live' if Twilio creds exist, else 'stub' — surfaced via GET /api/config. */
@@ -81,28 +103,70 @@ async function sendSms({ to, body, from }) {
 }
 
 /**
- * sendRvm({ to, body }) → { sid, status }
- * Stub unless RVM_API_KEY is set. A real integration would call a ringless
- * voicemail provider — see the TODO below.
+ * sendRvm({ to, body, audioUrl, from, sendAt }) → { sid, status }
+ *
+ * Drops a ringless voicemail via the configured provider. `audioUrl` is a
+ * publicly-fetchable recording (preferred — see routes/rvm.js); `body` is a
+ * TTS script fallback. `sendAt` (Date) schedules at the provider when it
+ * supports it (Slybroadcast); otherwise the CRM scheduler fires it.
+ * Never throws — provider failures come back in { status }.
  */
-async function sendRvm({ to, body }) {
+async function sendRvm({ to, body, audioUrl, from, sendAt }) {
   if (!rvmConfigured()) {
-    // STUB mode — no RVM provider configured.
-    console.log(`[RVM:STUB] to=${to} script="${body}"`);
+    console.log(`[RVM:STUB] to=${to} audio=${audioUrl || '(none)'} script="${body || ''}"`);
     return { sid: stubSid('STUB-RVM'), status: 'stubbed' };
   }
 
+  const digits = String(to || '').replace(/[^0-9]/g, '');
   try {
-    // TODO: real RVM integration goes here.
-    // Slybroadcast:  POST https://www.mobile-sphere.com/gateway/vmb.php
-    //   (form fields: c_uid, c_password/api key, c_phone=to, c_audio or
-    //    c_tts text, c_date=now) — parse the session_id from the response.
-    // Drop Cowboy:   POST https://api.dropcowboy.com/v1/rvm
-    //   (JSON: team_id, secret=RVM_API_KEY, phone_number=to, tts body,
-    //    brand_id) — parse the drop id from the response.
-    // Until wired up, treat a configured key as accepted-but-simulated:
-    console.log(`[RVM:LIVE(simulated)] to=${to} script="${body}"`);
-    return { sid: stubSid('RVM'), status: 'queued (provider call not yet wired)' };
+    if (rvmProvider() === 'dropcowboy') {
+      // Drop Cowboy RVM API (JSON). Uses a pre-uploaded recording_id when
+      // available, else TTS text.
+      const payload = {
+        team_id: process.env.DROP_COWBOY_TEAM_ID,
+        secret: process.env.DROP_COWBOY_SECRET || process.env.RVM_API_KEY,
+        phone_number: '+' + digits,
+        foreign_id: 'crm',
+      };
+      if (process.env.DROP_COWBOY_RECORDING_ID) payload.recording_id = process.env.DROP_COWBOY_RECORDING_ID;
+      else if (audioUrl) payload.audio_url = audioUrl;
+      else payload.tts = body || '';
+      const res = await fetch('https://api.dropcowboy.com/v1/rvm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { sid: null, status: `failed: ${data.message || 'HTTP ' + res.status}` };
+      return { sid: data.rvm_id || data.id || stubSid('DC'), status: sendAt ? 'scheduled' : 'queued' };
+    }
+
+    // Default provider: Slybroadcast (form-encoded gateway). Broadcasts a
+    // hosted audio file (audioUrl); c_date schedules or sends now.
+    const params = new URLSearchParams();
+    params.set('c_uid', process.env.SLYBROADCAST_EMAIL || '');
+    params.set('c_password', process.env.SLYBROADCAST_PASSWORD || '');
+    params.set('c_phone', digits);
+    params.set('c_callerID', String(from || process.env.TWILIO_FROM || '').replace(/[^0-9]/g, ''));
+    params.set('c_date', sendAt instanceof Date ? slyDate(sendAt) : 'now');
+    params.set('mobile_only', '0');
+    if (audioUrl) {
+      params.set('c_url', audioUrl);            // hosted audio file URL
+      params.set('c_audio_type', 'audio/mpeg');
+    } else {
+      params.set('c_record_audio', body || ''); // TTS fallback text
+    }
+    const res = await fetch('https://www.mobile-sphere.com/gateway/vmb.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    const text = await res.text().catch(() => '');
+    if (/OK/i.test(text) && !/error/i.test(text)) {
+      const m = text.match(/session_id\s*=\s*(\w+)/i);
+      return { sid: m ? m[1] : stubSid('SLY'), status: sendAt ? 'scheduled' : 'queued' };
+    }
+    return { sid: null, status: `failed: ${(text || 'provider error').slice(0, 120)}` };
   } catch (err) {
     console.error('[RVM] send failed:', err.message);
     return { sid: null, status: `failed: ${err.message}` };
@@ -147,4 +211,4 @@ async function fetchLicensedListings(query) {
   }
 }
 
-module.exports = { sendSms, sendRvm, messagingMode, fetchLicensedListings };
+module.exports = { sendSms, sendRvm, messagingMode, rvmMode, rvmProvider, rvmConfigured, fetchLicensedListings };

@@ -20,6 +20,21 @@ const { db, getSetting } = require('./db');
 const DEFAULT_CRON = '0 6 * * *'; // 6am daily
 
 let job = null;
+let rvmJob = null;
+
+/** Start the once-a-minute ticker that sends any due scheduled RVMs. */
+function startRvmTicker() {
+  if (rvmJob) return;
+  try {
+    const { processDueRvms } = require('./routes/rvm');
+    rvmJob = cron.schedule('* * * * *', () => {
+      Promise.resolve(processDueRvms()).catch((e) => console.error('[rvm:sched] error:', e && e.message ? e.message : e));
+    });
+    console.log('[rvm:sched] scheduled RVM ticker (every minute)');
+  } catch (e) {
+    console.error('[rvm:sched] failed to start ticker:', e && e.message ? e.message : e);
+  }
+}
 
 function stop() {
   if (job) {
@@ -72,6 +87,7 @@ async function runNow() {
 
 /** (Re)schedule the daily auto-import from current settings. Never throws. */
 function reschedule() {
+  startRvmTicker(); // always run the RVM ticker (independent of Lead Engine)
   try {
     stop();
     const autoimport = (getSetting('leadengine_autoimport') || 'off') === 'on';

@@ -175,10 +175,43 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at  TEXT NOT NULL
 );
 
+-- Recorded ringless-voicemail audio clips (stored on the volume, like documents).
+CREATE TABLE IF NOT EXISTS rvm_recordings (
+  id          TEXT PRIMARY KEY,
+  owner_id    TEXT NOT NULL,
+  contact_id  TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+  label       TEXT,
+  stored      TEXT NOT NULL,
+  mime        TEXT,
+  size        INTEGER,
+  duration_ms INTEGER,
+  created_by  TEXT,
+  created_at  TEXT NOT NULL
+);
+
+-- Ringless voicemails queued to send now or at a scheduled time.
+CREATE TABLE IF NOT EXISTS scheduled_rvms (
+  id           TEXT PRIMARY KEY,
+  contact_id   TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  owner_id     TEXT NOT NULL,
+  recording_id TEXT REFERENCES rvm_recordings(id) ON DELETE SET NULL,
+  phone        TEXT NOT NULL,
+  script       TEXT,
+  send_at      TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'scheduled',
+  provider_ref TEXT,
+  error        TEXT,
+  created_by   TEXT,
+  created_at   TEXT NOT NULL,
+  sent_at      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_contacts_owner   ON contacts(owner_id);
 CREATE INDEX IF NOT EXISTS idx_activities_contact ON activities(contact_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner      ON tasks(owner_id);
 CREATE INDEX IF NOT EXISTS idx_documents_contact ON documents(contact_id);
+CREATE INDEX IF NOT EXISTS idx_rvmrec_contact ON rvm_recordings(contact_id);
+CREATE INDEX IF NOT EXISTS idx_schedrvm_due ON scheduled_rvms(status, send_at);
 `);
 
 // ---------------------------------------------------------------------------

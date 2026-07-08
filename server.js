@@ -27,7 +27,8 @@ const googleRoutes = require('./routes/google');
 const microsoftRoutes = require('./routes/microsoft');
 const twilioRoutes = require('./routes/twilio');
 const documentRoutes = require('./routes/documents');
-const scheduler = require('./scheduler'); // Lead Engine daily auto-import
+const rvmRoutes = require('./routes/rvm');
+const scheduler = require('./scheduler'); // Lead Engine daily auto-import + RVM ticker
 
 const app = express();
 app.use(cors());
@@ -78,6 +79,11 @@ app.use('/api/twilio', twilioRoutes.router);
 // Per-contact document uploads. Defines /contacts/:id/documents and
 // /documents/:docId[/download]; each route applies requireAuth itself.
 app.use('/api', documentRoutes);
+
+// Ringless voicemail: record/store/send/schedule. The public audio route
+// (/rvm/recordings/:id/public) is intentionally unauthenticated so the RVM
+// provider can fetch the clip; all other routes apply requireAuth themselves.
+app.use('/api', rvmRoutes);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);
