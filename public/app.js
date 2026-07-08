@@ -250,6 +250,11 @@ async function bootApp() {
 
   await refreshContacts().catch(toastErr);
   switchTab('pipeline');
+
+  // Unlistened-voicemail alert badge (poll every 45s).
+  setupVoicemailBadge();
+  refreshVoicemailBadge();
+  if (!state._vmPoll) state._vmPoll = setInterval(refreshVoicemailBadge, 45000);
 }
 
 function isAdmin() { return state.user && state.user.role === 'admin'; }
@@ -1084,6 +1089,22 @@ function openContactModal(contact, leadDraft) {
       '</div>';
   }
 
+  // ---- Lead status: actually set NEW / IN QUEUE / WORKING (the pin only
+  //      prevents auto-changes; this control changes the status directly).
+  if (!isNew) {
+    const cur = c.lead_status || '';
+    html += '<div class="adminbar">' +
+      '<div class="field" style="margin:0"><label>Lead status</label>' +
+      '<select id="leadStatusSel" style="min-width:150px">' +
+      '<option value=""' + (!cur ? ' selected' : '') + '>— none —</option>' +
+      ['NEW', 'IN QUEUE', 'WORKING'].map(function (s) {
+        return '<option value="' + escAttr(s) + '"' + (cur === s ? ' selected' : '') + '>' + esc(s) + '</option>';
+      }).join('') +
+      '</select></div>' +
+      '<button class="btn blue small" id="setNewBtn" title="Change this lead’s status to NEW">Set to NEW</button>' +
+      '</div>';
+  }
+
   // ---- Details
   html += '<div class="sec" style="margin-top:0"><h4>Details</h4><div class="grid2">';
   CONTACT_TEXT_FIELDS.forEach(function (f) { html += fieldHtml(f, c[f.key] || ''); });
@@ -1500,6 +1521,21 @@ function openContactModal(contact, leadDraft) {
   // ---- Ringless voicemail: recorder + send / schedule
   wireRvm(c, overlay);
 
+  // ---- Lead status control (change status, e.g. back to NEW)
+  const leadSel = $('#leadStatusSel', overlay);
+  const applyLeadStatus = async function (val) {
+    try {
+      const u = await api('PATCH', '/contacts/' + encodeURIComponent(c.id), { lead_status: val || null });
+      if (u) replaceContact(u);
+      if (leadSel) leadSel.value = val || '';
+      toast('Lead status ' + (val ? 'set to ' + val : 'cleared'), 'ok');
+      rerenderCurrentContactView();
+    } catch (e) { toastErr(e); }
+  };
+  if (leadSel) leadSel.addEventListener('change', function () { applyLeadStatus(this.value); });
+  const setNewBtn = $('#setNewBtn', overlay);
+  if (setNewBtn) setNewBtn.addEventListener('click', function () { applyLeadStatus('NEW'); });
+
   // ---- Admin: assign-to-user dropdown (PATCHes owner_id; owner_id is the
   //      tenant-isolation key, so assigning moves visibility to that user).
   if (isAdmin()) {
@@ -1640,6 +1676,43 @@ function toggleHtml(key, label, checked) {
     (checked ? ' checked' : '') + '> ' + esc(label) + '</label>';
 }
 
+/* ---- Unread inbound-voicemail alert (nav badge, polled) ---- */
+
+function setupVoicemailBadge() {
+  if (document.getElementById('vmBadge')) return;
+  const topbar = document.querySelector('.topbar');
+  const who = document.getElementById('whoBox');
+  if (!topbar || !who) return;
+  const b = document.createElement('button');
+  b.id = 'vmBadge';
+  b.className = 'btn small vm-badge hidden';
+  b.title = 'Unlistened voicemails — click to open';
+  b.addEventListener('click', openMostRecentUnreadVm);
+  topbar.insertBefore(b, who);
+}
+
+async function refreshVoicemailBadge() {
+  const b = document.getElementById('vmBadge');
+  if (!b) return;
+  try {
+    const r = await api('GET', '/voicemails/unread');
+    state._vmUnread = (r && r.items) ? r.items : [];
+    const n = (r && r.count) ? r.count : 0;
+    if (n > 0) { b.textContent = '🎙 ' + n + ' new voicemail' + (n > 1 ? 's' : ''); b.classList.remove('hidden'); }
+    else { b.classList.add('hidden'); }
+  } catch (e) { /* ignore */ }
+}
+
+async function openMostRecentUnreadVm() {
+  const items = state._vmUnread || [];
+  if (!items.length) return;
+  const vm = items[0];
+  let c = state.contacts.find(function (x) { return String(x.id) === String(vm.contact_id); });
+  if (!c) { try { c = await api('GET', '/contacts/' + encodeURIComponent(vm.contact_id)); } catch (e) {} }
+  if (c) openContactModal(c);
+  else toast('Open the contact to hear the voicemail.', 'error');
+}
+
 async function loadActivities(contactId) {
   const box = $('#activityLog');
   if (!box) return;
@@ -1657,16 +1730,34 @@ async function loadActivities(contactId) {
       if (a.direction) extra.push(esc(a.direction));
       if (a.status) extra.push(esc(a.status));
       if (type === 'call' && a.duration_sec) extra.push(fmtDur(a.duration_sec));
+      // Inbound voicemail: playable + unread badge.
+      const isVm = type === 'rvm' && a.direction === 'inbound';
+      const newBadge = (isVm && !a.read_at) ? ' <span class="tag warn">NEW</span>' : '';
+      const playBtn = (isVm && a.provider_id)
+        ? ' <button class="btn ghost small" data-vmplay="' + escAttr(a.provider_id) + '" data-vmact="' + escAttr(a.id) + '">▶ Play</button>'
+        : '';
       return '<div class="logitem">' +
         '<div class="lh">' +
-        '<span><span class="typechip ' + chipClass + '">' + esc(type.toUpperCase()) + '</span>' +
+        '<span><span class="typechip ' + chipClass + '">' + esc(type.toUpperCase()) + '</span>' + newBadge +
         (extra.length ? ' <span>' + extra.join(' &middot; ') + '</span>' : '') + '</span>' +
         '<span>' + esc(fmtTimestamp(a.created_at)) + (a.created_by ? ' &middot; ' + esc(a.created_by) : '') + '</span>' +
         '</div>' +
-        '<div>' + esc(a.body || '') + '</div>' +
+        '<div>' + esc(a.body || '') + playBtn + '</div>' +
         '</div>';
     }).join('');
     box.scrollTop = box.scrollHeight;
+
+    // Wire inbound-voicemail play buttons (play + mark as listened).
+    $all('[data-vmplay]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        playRecording(b.getAttribute('data-vmplay'));
+        try {
+          await api('POST', '/voicemails/' + encodeURIComponent(b.getAttribute('data-vmact')) + '/read');
+          loadActivities(contactId);
+          refreshVoicemailBadge();
+        } catch (e) {}
+      });
+    });
   } catch (e) {
     box.innerHTML = '<p class="hint">Could not load activity: ' + esc(e.message) + '</p>';
   }

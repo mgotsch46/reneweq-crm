@@ -455,3 +455,8 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 /* RVM recorder row */
 .rvmrec{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:4px 0 6px; }
 #rvmRecBtn{ color:#ff2d78; }
+
+/* Unread-voicemail alert badge in the top bar */
+.vm-badge{ background:#ff2d78; border-color:#ff2d78; color:#fff; font-weight:700; }
+.vm-badge:hover{ background:#ff4f8f; border-color:#ff4f8f; }
+.vm-badge.hidden{ display:none; }
