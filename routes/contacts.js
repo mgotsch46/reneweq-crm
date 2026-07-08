@@ -55,7 +55,8 @@ function getOwnedContact(id, user) {
   return canTouch(user, row) ? row : null; // isolation check
 }
 
-function logActivity({ contact, user, type, mode, direction, body, status, provider_id }) {
+function logActivity({ contact, user, type, mode, direction, body, status, provider_id, duration_sec }) {
+  const dur = parseInt(duration_sec, 10);
   const act = {
     id: uid(),
     contact_id: contact.id,
@@ -66,12 +67,13 @@ function logActivity({ contact, user, type, mode, direction, body, status, provi
     body: body || null,
     status: status || null,
     provider_id: provider_id || null,
+    duration_sec: Number.isFinite(dur) && dur >= 0 ? dur : null,
     created_by: user.id,
     created_at: now(),
   };
   db.prepare(`
-    INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, provider_id, created_by, created_at)
-    VALUES (@id, @contact_id, @owner_id, @type, @mode, @direction, @body, @status, @provider_id, @created_by, @created_at)
+    INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, provider_id, duration_sec, created_by, created_at)
+    VALUES (@id, @contact_id, @owner_id, @type, @mode, @direction, @body, @status, @provider_id, @duration_sec, @created_by, @created_at)
   `).run(act);
   return act;
 }
@@ -244,6 +246,53 @@ function insertContactRow(contact) {
   `).run(contact);
 }
 
+/**
+ * Normalize a property address for duplicate comparison:
+ * lowercase, punctuation → space, collapse whitespace, trim.
+ * "123 Maple St., Dallas, TX" and "123 maple st  Dallas TX" compare equal.
+ */
+function normAddr(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[.,#]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Company-wide duplicate check on the property address. Returns the existing
+ * contact row (id, owner_id, name, property) if another contact already has
+ * the same normalized address, else null. `excludeId` skips a row (for edits).
+ */
+function findDuplicateProperty(property, excludeId) {
+  const target = normAddr(property);
+  if (!target) return null; // blank addresses are never treated as duplicates
+  const rows = db.prepare(
+    "SELECT id, owner_id, name, property FROM contacts WHERE property IS NOT NULL AND property != ''"
+  ).all();
+  for (const r of rows) {
+    if (excludeId && String(r.id) === String(excludeId)) continue;
+    if (normAddr(r.property) === target) return r;
+  }
+  return null;
+}
+
+/** Build a 409 duplicate response body (privacy-aware for cross-owner rows). */
+function duplicatePropertyError(req, dup) {
+  const ownedByRequester = String(dup.owner_id) === String(req.user.id);
+  if (ownedByRequester || isAdmin(req.user)) {
+    return {
+      error: `This property address is already in the CRM ("${dup.name || 'contact'}"). It wasn't added again.`,
+      duplicateId: dup.id,
+      ownedByRequester,
+    };
+  }
+  return {
+    error: 'This property address is already in the CRM (added by another team member). It wasn’t added again.',
+    ownedByRequester: false,
+  };
+}
+
 /** ISOLATION: owner is the requester; only an admin may assign another owner. */
 function resolveOwnerId(req, body) {
   if (isAdmin(req.user) && body.owner_id) {
@@ -264,6 +313,10 @@ router.post('/', (req, res) => {
 
   const owner = resolveOwnerId(req, body); // ISOLATION
   if (owner.error) return res.status(400).json({ error: owner.error });
+
+  // Company-wide duplicate guard on the property address.
+  const dup = findDuplicateProperty(body.property);
+  if (dup) return res.status(409).json(duplicatePropertyError(req, dup));
 
   const contact = buildContact(body, owner.ownerId);
   insertContactRow(contact);
@@ -296,11 +349,15 @@ router.post('/bulk-assign', (req, res) => {
 
   let updated = 0;
   const ts = now();
-  const setOwner = db.prepare('UPDATE contacts SET owner_id = ?, updated_at = ? WHERE id = ?');
+  // On (re)assignment, the lead shows up as NEW and unopened in the
+  // assignee's dashboard so they know it's freshly handed to them.
+  const setOwner = db.prepare(
+    "UPDATE contacts SET owner_id = ?, lead_status = 'NEW', opened = 0, opened_at = NULL, updated_at = ? WHERE id = ?"
+  );
   const setActOwner = db.prepare('UPDATE activities SET owner_id = ? WHERE contact_id = ?');
   db.transaction(() => {
     for (const id of ids) {
-      const r = setOwner.run(target.id, ts, id); // owner only — no status side effects
+      const r = setOwner.run(target.id, ts, id); // assign + flag as NEW for the new owner
       if (Number(r.changes)) {
         setActOwner.run(target.id, id); // keep activity rows consistent
         updated++;
@@ -376,6 +433,12 @@ router.patch('/:id', (req, res) => {
     return res.status(400).json({ error: `lead_status must be one of: ${LEAD_STATUSES.join(', ')}` });
   }
 
+  // If the property address is being changed, keep it company-wide unique.
+  if ('property' in body && normAddr(body.property) !== normAddr(contact.property)) {
+    const dup = findDuplicateProperty(body.property, contact.id);
+    if (dup) return res.status(409).json(duplicatePropertyError(req, dup));
+  }
+
   const sets = [];
   const params = {};
   for (const f of CONTACT_FIELDS) {
@@ -393,6 +456,7 @@ router.patch('/:id', (req, res) => {
 
   // ASSIGN-TO-USER: only an ADMIN may change owner_id (the tenant-isolation
   // key) to assign a lead to a user; non-admins can never reassign.
+  let assignedToNewOwner = false;
   if ('owner_id' in body && String(body.owner_id) !== String(contact.owner_id)) {
     if (!isAdmin(req.user)) {
       return res.status(403).json({ error: 'Only an admin can reassign a contact' });
@@ -401,6 +465,7 @@ router.patch('/:id', (req, res) => {
     if (!target) return res.status(400).json({ error: 'owner_id does not exist' });
     sets.push('owner_id = @owner_id');
     params.owner_id = target.id;
+    assignedToNewOwner = true;
     // Keep activity rows consistent with the new owner.
     db.prepare('UPDATE activities SET owner_id = ? WHERE contact_id = ?').run(target.id, contact.id);
   }
@@ -410,6 +475,13 @@ router.patch('/:id', (req, res) => {
   params.updated_at = now();
   params.id = contact.id;
   db.prepare(`UPDATE contacts SET ${sets.join(', ')}, updated_at = @updated_at WHERE id = @id`).run(params);
+
+  // A freshly-assigned lead shows as NEW and unopened in the assignee's
+  // dashboard (applied after the main update so it wins over any prior value).
+  if (assignedToNewOwner) {
+    db.prepare("UPDATE contacts SET lead_status = 'NEW', opened = 0, opened_at = NULL WHERE id = ?")
+      .run(contact.id);
+  }
 
   // Log a stage-change activity when the pipeline stage moves.
   if (body.stage && body.stage !== contact.stage) {
@@ -458,7 +530,7 @@ router.post('/:id/activities', (req, res) => {
   const contact = getOwnedContact(req.params.id, req.user); // isolation check
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
 
-  const { type, body, mode, direction } = req.body || {};
+  const { type, body, mode, direction, status, duration_sec } = req.body || {};
   if (!ACTIVITY_TYPES.includes(type)) {
     return res.status(400).json({ error: `type must be one of: ${ACTIVITY_TYPES.join(', ')}` });
   }
@@ -466,7 +538,8 @@ router.post('/:id/activities', (req, res) => {
     contact, user: req.user, type, body,
     mode: mode === 'automated' ? 'automated' : 'manual',
     direction: direction === 'inbound' ? 'inbound' : 'outbound',
-    status: 'logged',
+    status: status ? String(status) : 'logged',
+    duration_sec,
   });
   if (type === 'call') markCalled(contact); // call logged -> WORKING
   res.status(201).json(act);
@@ -674,6 +747,10 @@ leadsRouter.post('/', (req, res) => {
 
   const owner = resolveOwnerId(req, body); // ISOLATION
   if (owner.error) return res.status(400).json({ error: owner.error });
+
+  // Company-wide duplicate guard on the property address.
+  const dup = findDuplicateProperty(body.property);
+  if (dup) return res.status(409).json(duplicatePropertyError(req, dup));
 
   const name =
     body.name || body.sellerName || body.agentName || body.property || 'New Lead';
