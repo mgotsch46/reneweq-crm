@@ -25,6 +25,7 @@ const state = {
   assignees: [], // active users for task assignment (all roles can load this)
   google: null, // {configured, connected, email} from /api/google/status
   microsoft: null, // {configured, connected, email} from /api/microsoft/status
+  twilio: { status: null, device: null, call: null, incoming: null, muted: false, seconds: 0, timer: null, contactId: null, contactName: '', number: '', direction: 'outbound', note: '' },
   tab: 'pipeline',
   contactSearch: '',
   contactList: null, // server-filtered list for the Contacts view
@@ -228,6 +229,7 @@ async function bootApp() {
   }
   await refreshGoogleStatus(); // never throws
   await refreshMicrosoftStatus(); // never throws
+  await refreshTwilioStatus(); // never throws
 
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
@@ -280,6 +282,225 @@ async function refreshMicrosoftStatus() {
     state.microsoft = null; // older server / fetch failure — treat as unavailable
   }
   return state.microsoft;
+}
+
+/* ------------------------- Twilio softphone + SMS ------------------------- */
+
+async function refreshTwilioStatus() {
+  try {
+    state.twilio.status = await api('GET', '/twilio/status');
+  } catch (e) {
+    state.twilio.status = null;
+  }
+  // Register the browser device for calls when Voice is configured.
+  if (state.twilio.status && state.twilio.status.voiceConfigured) {
+    initTwilioDevice(); // fire-and-forget; never throws
+  }
+  return state.twilio.status;
+}
+
+/** Initialize (or re-initialize) the Twilio Voice Device for this browser. */
+async function initTwilioDevice() {
+  if (state.twilio.device) return; // already set up
+  if (typeof Twilio === 'undefined' || !Twilio.Device) {
+    console.warn('[twilio] Voice SDK not loaded');
+    return;
+  }
+  try {
+    const r = await api('GET', '/twilio/token');
+    if (!r || !r.token) return;
+    const device = new Twilio.Device(r.token, { codecPreferences: ['opus', 'pcmu'], logLevel: 'error' });
+    device.on('registered', function () { console.log('[twilio] device registered'); });
+    device.on('error', function (e) { console.error('[twilio] device error:', e && e.message); });
+    device.on('incoming', onTwilioIncoming);
+    device.on('tokenWillExpire', async function () {
+      try { const t = await api('GET', '/twilio/token'); if (t && t.token) device.updateToken(t.token); }
+      catch (e) { /* ignore */ }
+    });
+    await device.register();
+    state.twilio.device = device;
+  } catch (e) {
+    console.error('[twilio] init failed:', e);
+  }
+}
+
+function twilioReady() { return !!(state.twilio.status && state.twilio.status.voiceConfigured && state.twilio.device); }
+
+/** Place an outbound call from the browser to a contact's number. */
+async function placeCall(number, contactId, contactName) {
+  if (!number) { toast('No phone number for this contact.', 'error'); return; }
+  if (!twilioReady()) {
+    if (!state.twilio.status || !state.twilio.status.voiceConfigured) { toast('Calling is not configured yet.', 'error'); return; }
+    toast('Phone still connecting — try again in a moment.', 'error');
+    initTwilioDevice();
+    return;
+  }
+  if (state.twilio.call || state.twilio.incoming) { toast('Already on a call.', 'error'); return; }
+  try {
+    const call = await state.twilio.device.connect({ params: { To: number } });
+    const t = state.twilio;
+    t.call = call; t.number = number; t.contactId = contactId || null; t.contactName = contactName || '';
+    t.direction = 'outbound'; t.note = ''; t.seconds = 0; t.muted = false;
+    wireCall(call);
+    startCallTimer();
+    renderCallWidget();
+  } catch (e) {
+    console.error('[twilio] connect failed:', e);
+    toast('Could not start the call.', 'error');
+  }
+}
+
+/** Handle an inbound call ringing at this browser. */
+function onTwilioIncoming(call) {
+  if (state.twilio.call) { call.reject(); return; } // busy
+  const from = (call.parameters && call.parameters.From) || '';
+  const match = findContactByNumberLocal(from);
+  const t = state.twilio;
+  t.incoming = call; t.number = from; t.contactId = match ? match.id : null;
+  t.contactName = match ? (match.name || '') : ''; t.direction = 'inbound'; t.note = ''; t.seconds = 0; t.muted = false;
+  call.on('cancel', function () { // caller hung up before we answered
+    state.twilio.incoming = null; renderCallWidget();
+  });
+  call.on('disconnect', onCallEnd);
+  renderCallWidget();
+}
+
+function acceptIncoming() {
+  const t = state.twilio;
+  if (!t.incoming) return;
+  const call = t.incoming;
+  call.accept();
+  t.call = call; t.incoming = null;
+  wireCall(call);
+  startCallTimer();
+  renderCallWidget();
+}
+
+function rejectIncoming() {
+  const t = state.twilio;
+  if (t.incoming) { try { t.incoming.reject(); } catch (e) {} }
+  t.incoming = null;
+  renderCallWidget();
+}
+
+function wireCall(call) {
+  call.on('disconnect', onCallEnd);
+  call.on('error', function (e) { console.error('[twilio] call error:', e && e.message); });
+}
+
+function toggleMute() {
+  const t = state.twilio;
+  if (!t.call) return;
+  t.muted = !t.muted;
+  try { t.call.mute(t.muted); } catch (e) {}
+  renderCallWidget();
+}
+
+function hangup() {
+  const t = state.twilio;
+  if (t.call) { try { t.call.disconnect(); } catch (e) {} }
+}
+
+/** Called when a live call ends — auto-log it with duration + notes. */
+async function onCallEnd() {
+  const t = state.twilio;
+  stopCallTimer();
+  const contactId = t.contactId, direction = t.direction, note = t.note, seconds = t.seconds;
+  // reset call state (keep widget briefly to show it closed)
+  t.call = null; t.incoming = null; t.muted = false;
+  renderCallWidget();
+  if (contactId) {
+    try {
+      await api('POST', '/contacts/' + contactId + '/activities', {
+        type: 'call', direction: direction, body: note || '', mode: 'automated',
+        status: 'completed', duration_sec: seconds,
+      });
+      toast('Call logged (' + fmtDur(seconds) + ').', 'ok');
+      if (state.openContactId === contactId) loadActivities(contactId);
+    } catch (e) { toastErr(e); }
+  }
+  t.contactId = null; t.contactName = ''; t.number = ''; t.note = ''; t.seconds = 0;
+}
+
+function startCallTimer() {
+  stopCallTimer();
+  state.twilio.timer = setInterval(function () {
+    state.twilio.seconds++;
+    const el = document.getElementById('cwTimer');
+    if (el) el.textContent = fmtDur(state.twilio.seconds);
+  }, 1000);
+}
+function stopCallTimer() {
+  if (state.twilio.timer) { clearInterval(state.twilio.timer); state.twilio.timer = null; }
+}
+
+function fmtDur(sec) {
+  sec = Math.max(0, parseInt(sec, 10) || 0);
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ':' + (s < 10 ? '0' + s : s);
+}
+
+/** Match an inbound number to a loaded contact (trailing 10 digits). */
+function findContactByNumberLocal(num) {
+  const digits = String(num || '').replace(/[^0-9]/g, '');
+  if (digits.length < 7) return null;
+  const last10 = digits.slice(-10);
+  return (state.contacts || []).find(function (c) {
+    if (!c.phone) return false;
+    return String(c.phone).replace(/[^0-9]/g, '').slice(-10) === last10;
+  }) || null;
+}
+
+/** Render the floating call widget based on current Twilio state. */
+function renderCallWidget() {
+  const w = document.getElementById('callWidget');
+  if (!w) return;
+  const t = state.twilio;
+  if (!t.call && !t.incoming) { w.classList.add('hidden'); w.innerHTML = ''; return; }
+  w.classList.remove('hidden');
+
+  // Incoming (ringing, not yet accepted)
+  if (t.incoming && !t.call) {
+    w.innerHTML =
+      '<div class="cw-head">Incoming call</div>' +
+      '<div class="cw-num">' + esc(t.number || 'Unknown') + (t.contactName ? ' &middot; ' + esc(t.contactName) : '') + '</div>' +
+      '<div class="cw-actions">' +
+        '<button class="btn small" id="cwAccept">Accept</button>' +
+        '<button class="btn ghost small danger" id="cwReject">Reject</button>' +
+      '</div>';
+    document.getElementById('cwAccept').onclick = acceptIncoming;
+    document.getElementById('cwReject').onclick = rejectIncoming;
+    return;
+  }
+
+  // Active call
+  w.innerHTML =
+    '<div class="cw-head">' + (t.direction === 'inbound' ? 'On call — incoming' : 'On call') + '</div>' +
+    '<div class="cw-num">' + esc(t.number || '') + (t.contactName ? ' &middot; ' + esc(t.contactName) : '') + '</div>' +
+    '<div class="cw-timer" id="cwTimer">' + fmtDur(t.seconds) + '</div>' +
+    '<textarea id="cwNote" class="cw-note" placeholder="Call notes — saved automatically when the call ends...">' + esc(t.note || '') + '</textarea>' +
+    '<div class="cw-actions">' +
+      '<button class="btn ghost small" id="cwMute">' + (t.muted ? 'Unmute' : 'Mute') + '</button>' +
+      '<button class="btn small danger" id="cwHang">Hang up</button>' +
+    '</div>';
+  const noteEl = document.getElementById('cwNote');
+  if (noteEl) noteEl.addEventListener('input', function () { state.twilio.note = this.value; });
+  document.getElementById('cwMute').onclick = toggleMute;
+  document.getElementById('cwHang').onclick = hangup;
+}
+
+/** Send an SMS to a contact through the CRM number, then refresh the log. */
+async function sendContactSms(contactId, number, body, btn) {
+  if (!body || !body.trim()) { toast('Type a message first.', 'error'); return false; }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/twilio/sms', { contactId: contactId, to: number, body: body.trim() });
+    if (r && r.ok) toast('Text sent.', 'ok');
+    else toast('Text: ' + ((r && r.status) || 'not sent'), 'error');
+    if (state.openContactId === contactId) loadActivities(contactId);
+    return !!(r && r.ok);
+  } catch (e) { toastErr(e); return false; }
+  finally { if (btn) btn.disabled = false; }
 }
 
 /* After returning from a provider's consent screen the callback redirects to
@@ -764,6 +985,7 @@ const DATE_FIELDS = [
 
 function closeModal() {
   $('#modalMount').innerHTML = '';
+  state.openContactId = null;
 }
 
 function fieldHtml(f, value, type) {
@@ -935,6 +1157,30 @@ function openContactModal(contact, leadDraft) {
   }
   html += '</div>';
 
+  // ---- Phone (in-app softphone + SMS via CRM number)
+  const tw = state.twilio.status || {};
+  if (!isNew && (tw.voiceConfigured || tw.smsConfigured)) {
+    html += '<div class="sec"><h4>Phone &amp; Text (in-app)</h4>';
+    if (!c.phone) {
+      html += '<p class="hint">Add a phone number to call or text this contact from the CRM.</p>';
+    } else {
+      html += '<p class="hint" style="margin:0 0 10px">Calls and texts go through your CRM number and are logged automatically below' +
+        (tw.from ? ' (from ' + esc(tw.from) + ')' : '') + '.</p>';
+      if (tw.voiceConfigured) {
+        html += '<div class="actions-row">' +
+          '<button class="btn blue small" id="appCallBtn">📞 Call in app</button>' +
+          '<span class="hint" id="appCallHint" style="align-self:center"></span>' +
+          '</div>';
+      }
+      if (tw.smsConfigured) {
+        html += '<div class="field" style="margin-top:10px"><label>Send a text</label>' +
+          '<textarea id="appSmsBody" rows="2" placeholder="Type a message to ' + escAttr(c.name || 'this contact') + '..."></textarea></div>' +
+          '<div class="actions-row"><button class="btn small" id="appSmsBtn">Send Text</button></div>';
+      }
+    }
+    html += '</div>';
+  }
+
   // ---- Automated text workflow
   html += '<div class="sec"><h4>Automated Text Workflow</h4>' +
     '<p class="hint" style="margin:0 0 10px">Tokens: <code>{name}</code> <code>{property}</code> <code>{agent}</code> are replaced when sending.' +
@@ -999,6 +1245,7 @@ function openContactModal(contact, leadDraft) {
 
   html += '</div></div>';
   mount.innerHTML = html;
+  state.openContactId = isNew ? null : c.id;
 
   const overlay = $('#contactOverlay');
   overlay.addEventListener('mousedown', function (ev) {
@@ -1069,6 +1316,22 @@ function openContactModal(contact, leadDraft) {
   }
 
   if (isNew) return; // no logging/sending/activity for unsaved contacts
+
+  // ---- In-app softphone call + SMS
+  const appCallBtn = $('#appCallBtn', overlay);
+  if (appCallBtn) {
+    appCallBtn.addEventListener('click', function () {
+      placeCall(c.phone, c.id, c.name);
+    });
+  }
+  const appSmsBtn = $('#appSmsBtn', overlay);
+  if (appSmsBtn) {
+    appSmsBtn.addEventListener('click', async function () {
+      const bodyEl = $('#appSmsBody', overlay);
+      const ok = await sendContactSms(c.id, c.phone, bodyEl ? bodyEl.value : '', appSmsBtn);
+      if (ok && bodyEl) bodyEl.value = '';
+    });
+  }
 
   // ---- Log buttons
   $all('[data-log]', overlay).forEach(function (btn) {
@@ -1330,6 +1593,7 @@ async function loadActivities(contactId) {
       if (a.mode) extra.push(esc(a.mode));
       if (a.direction) extra.push(esc(a.direction));
       if (a.status) extra.push(esc(a.status));
+      if (type === 'call' && a.duration_sec) extra.push(fmtDur(a.duration_sec));
       return '<div class="logitem">' +
         '<div class="lh">' +
         '<span><span class="typechip ' + chipClass + '">' + esc(type.toUpperCase()) + '</span>' +

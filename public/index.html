@@ -38,12 +38,6 @@
       <span id="authToggleLabel">Need an account?</span>
       <button type="button" class="linklike" id="authToggle">Create account</button>
     </p>
-
-    <div class="demo-hint">
-      Demo logins:<br>
-      <code>admin@demo.com</code> / <code>admin123</code> (admin)<br>
-      <code>marisa@demo.com</code> / <code>demo123</code>
-    </div>
   </div>
 </div>
 
@@ -78,6 +72,11 @@
 <!-- MODAL MOUNT -->
 <div id="modalMount"></div>
 
+<!-- SOFTPHONE CALL WIDGET (shown during active/incoming Twilio calls) -->
+<div id="callWidget" class="call-widget hidden"></div>
+
+<!-- Twilio Voice SDK (in-browser softphone) -->
+<script src="https://sdk.twilio.com/js/voice/releases/2.11.1/twilio.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

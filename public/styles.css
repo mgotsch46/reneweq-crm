@@ -400,3 +400,30 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
     backdrop-filter:blur(14px) saturate(150%);
   }
 }
+
+/* ---- Softphone call widget ---- */
+.call-widget{
+  position:fixed; right:20px; bottom:20px; z-index:1200;
+  width:290px; padding:16px; border-radius:16px;
+  background:rgba(17,23,46,.92); color:#fff;
+  border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 18px 50px rgba(0,0,0,.45);
+  -webkit-backdrop-filter:blur(16px) saturate(150%);
+  backdrop-filter:blur(16px) saturate(150%);
+  animation:cwIn .18s ease-out;
+}
+.call-widget.hidden{ display:none; }
+@keyframes cwIn{ from{ transform:translateY(10px); opacity:0; } to{ transform:translateY(0); opacity:1; } }
+.call-widget .cw-head{ font-size:12px; letter-spacing:.04em; text-transform:uppercase; opacity:.7; margin-bottom:4px; }
+.call-widget .cw-num{ font-size:16px; font-weight:700; margin-bottom:8px; word-break:break-word; }
+.call-widget .cw-timer{ font-size:26px; font-weight:800; font-variant-numeric:tabular-nums; margin:2px 0 10px; }
+.call-widget .cw-note{
+  width:100%; box-sizing:border-box; min-height:64px; resize:vertical;
+  border-radius:10px; border:1px solid rgba(255,255,255,.18);
+  background:rgba(255,255,255,.06); color:#fff; padding:8px 10px; font:inherit; font-size:13px;
+  margin-bottom:10px;
+}
+.call-widget .cw-note::placeholder{ color:rgba(255,255,255,.45); }
+.call-widget .cw-actions{ display:flex; gap:8px; justify-content:flex-end; }
+.btn.danger{ background:#c0392b; border-color:#c0392b; color:#fff; }
+.btn.ghost.danger{ background:transparent; color:#ff6b5e; border-color:rgba(255,107,94,.5); }
