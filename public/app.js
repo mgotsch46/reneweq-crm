@@ -1280,6 +1280,20 @@ function openContactModal(contact, leadDraft) {
         '<div class="tasklist" id="contactTasks"><p class="hint">Loading tasks...</p></div>') +
     '</div>';
 
+  // ---- Documents (uploaded files for this contact)
+  html += '<div class="sec"><h4>Documents</h4>' +
+    (isNew
+      ? '<p class="hint">Save the contact first to upload documents.</p>'
+      : '<p class="hint" style="margin:0 0 10px">Upload contracts, photos, or any file for this contact (up to 25&nbsp;MB each).</p>' +
+        '<div class="actions-row">' +
+        '  <input type="file" id="docFile" style="display:none">' +
+        '  <button class="btn small" id="docPick" type="button">Choose file…</button>' +
+        '  <span class="hint" id="docPickName" style="align-self:center"></span>' +
+        '  <button class="btn blue small" id="docUpload" type="button" disabled>Upload</button>' +
+        '</div>' +
+        '<div class="doclist" id="contactDocs"><p class="hint">Loading documents...</p></div>') +
+    '</div>';
+
   // ---- Activity log
   html += '<div class="sec"><h4>Activity Log</h4><div class="log" id="activityLog">' +
     (isNew ? '<p class="hint">Activity appears after the contact is saved.</p>' : '<p class="hint">Loading activity...</p>') +
@@ -1403,6 +1417,9 @@ function openContactModal(contact, leadDraft) {
       btn.disabled = false;
     });
   });
+
+  // ---- Documents (upload / list / download / delete)
+  wireDocuments(c.id, overlay);
 
   // ---- Contact tasks (linked to this contact)
   loadContactTasks(c.id, overlay);
@@ -1930,6 +1947,135 @@ function wireTaskEditing(item, reload) {
       await reload();
     } catch (e) { toastErr(e); save.disabled = false; }
   });
+}
+
+/* ------------------------------ Documents ------------------------------ */
+
+var DOC_MAX_BYTES = 25 * 1024 * 1024; // keep in sync with routes/documents.js
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+/** Wire the Documents section: file picker, upload, and load the list. */
+function wireDocuments(contactId, overlay) {
+  const pick = $('#docPick', overlay);
+  const fileInput = $('#docFile', overlay);
+  const nameEl = $('#docPickName', overlay);
+  const uploadBtn = $('#docUpload', overlay);
+  if (!fileInput || !uploadBtn) return; // isNew contact: no documents UI
+
+  if (pick) pick.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) { nameEl.textContent = ''; uploadBtn.disabled = true; return; }
+    if (f.size > DOC_MAX_BYTES) {
+      toast('That file is larger than 25 MB.', 'error');
+      fileInput.value = ''; nameEl.textContent = ''; uploadBtn.disabled = true; return;
+    }
+    nameEl.textContent = f.name + ' (' + fmtBytes(f.size) + ')';
+    uploadBtn.disabled = false;
+  });
+
+  uploadBtn.addEventListener('click', async function () {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) { toast('Choose a file first.', 'error'); return; }
+    uploadBtn.disabled = true;
+    const prev = uploadBtn.textContent;
+    uploadBtn.textContent = 'Uploading…';
+    try {
+      const dataBase64 = await fileToBase64(f);
+      await api('POST', '/contacts/' + encodeURIComponent(contactId) + '/documents', {
+        filename: f.name, mime: f.type || null, dataBase64: dataBase64,
+      });
+      toast('Uploaded ' + f.name, 'ok');
+      fileInput.value = ''; nameEl.textContent = '';
+      loadDocuments(contactId, overlay);
+    } catch (e) {
+      toastErr(e);
+    }
+    uploadBtn.textContent = prev;
+    uploadBtn.disabled = true;
+  });
+
+  loadDocuments(contactId, overlay);
+}
+
+/** Read a File as a base64 string (no data: prefix). */
+function fileToBase64(file) {
+  return new Promise(function (resolve, reject) {
+    const r = new FileReader();
+    r.onload = function () {
+      const s = String(r.result || '');
+      resolve(s.indexOf(',') !== -1 ? s.slice(s.indexOf(',') + 1) : s);
+    };
+    r.onerror = function () { reject(new Error('Could not read the file.')); };
+    r.readAsDataURL(file);
+  });
+}
+
+/** Load + render the document list for a contact, inside its modal. */
+async function loadDocuments(contactId, overlay) {
+  const box = overlay ? $('#contactDocs', overlay) : $('#contactDocs');
+  if (!box) return;
+  try {
+    const docs = await api('GET', '/contacts/' + encodeURIComponent(contactId) + '/documents') || [];
+    if (!docs.length) { box.innerHTML = '<p class="hint">No documents yet.</p>'; return; }
+    box.innerHTML = docs.map(function (d) {
+      return '<div class="docitem" data-doc="' + escAttr(d.id) + '">' +
+        '<span class="docname" title="' + escAttr(d.filename) + '">📄 ' + esc(d.filename) + '</span>' +
+        '<span class="docmeta">' + esc(fmtBytes(d.size)) + ' &middot; ' + esc(fmtTimestamp(d.created_at)) + '</span>' +
+        '<span class="docacts">' +
+        '<button class="btn ghost small" data-dl="' + escAttr(d.id) + '" data-name="' + escAttr(d.filename) + '">Download</button>' +
+        '<button class="btn ghost small danger" data-del="' + escAttr(d.id) + '">Delete</button>' +
+        '</span></div>';
+    }).join('');
+
+    $all('[data-dl]', box).forEach(function (b) {
+      b.addEventListener('click', function () {
+        downloadDocument(b.getAttribute('data-dl'), b.getAttribute('data-name'), b);
+      });
+    });
+    $all('[data-del]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        if (!window.confirm('Delete this document? This cannot be undone.')) return;
+        b.disabled = true;
+        try {
+          await api('DELETE', '/documents/' + encodeURIComponent(b.getAttribute('data-del')));
+          toast('Document deleted', 'ok');
+          loadDocuments(contactId, overlay);
+        } catch (e) { toastErr(e); b.disabled = false; }
+      });
+    });
+  } catch (e) {
+    box.innerHTML = '<p class="hint">Could not load documents: ' + esc(e.message) + '</p>';
+  }
+}
+
+/** Download a document (auth header → blob → save) so the token isn't in the URL. */
+async function downloadDocument(docId, filename, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/documents/' + encodeURIComponent(docId) + '/download', {
+      headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+    });
+    if (!res.ok) throw new Error('Download failed (' + res.status + ')');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'document';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  } catch (e) {
+    toastErr(e);
+  }
+  if (btn) btn.disabled = false;
 }
 
 /** Load + render the tasks linked to a single contact, inside its modal. */
