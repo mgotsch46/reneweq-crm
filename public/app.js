@@ -1254,7 +1254,7 @@ function openContactModal(contact, leadDraft) {
   html += '</div>';
 
   // ---- RVM
-  html += '<div class="sec"><h4>Ringless Voicemail</h4>' +
+  html += '<div class="sec"><h4>Ringless Voicemail <span class="hint" id="rvmProviderStatus" style="font-weight:400"></span></h4>' +
     '<p class="hint" style="margin:0 0 10px">Record a voicemail and drop it now or schedule it. Delivered ringless via your RVM provider (Slybroadcast / Drop Cowboy). Requires RVM consent; blocked for DNC.</p>' +
     '<div class="field"><label>Voicemail script (text-to-speech fallback if no recording is selected)</label>' +
     '<textarea data-field="rvm" rows="2" placeholder="Voicemail message...">' + esc(c.rvm || '') + '</textarea></div>' +
@@ -2187,6 +2187,16 @@ function wireRvm(c, overlay) {
 
   loadRvmRecordings(c.id, overlay);
   loadRvmScheduled(c.id, overlay);
+
+  // Show whether RVM delivery is live (provider connected) or stubbed.
+  api('GET', '/rvm/status').then(function (s) {
+    const el = $('#rvmProviderStatus', overlay);
+    if (!el || !s) return;
+    el.textContent = s.mode === 'live'
+      ? '· live via ' + s.provider
+      : '· not connected (test mode)';
+    el.style.color = s.mode === 'live' ? '#39d98a' : '';
+  }).catch(function () {});
 }
 
 async function sendRvmForContact(c, overlay, sendAt) {
