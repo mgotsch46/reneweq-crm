@@ -61,9 +61,24 @@ async function syncTaskToGoogle(ownerId, task) {
   return g || { taskId: null, eventId: null, error: 'push failed' };
 }
 
-/** POST /api/tasks {title, due_date?, contact_id?, external_ref?} */
+/** Normalize an HH:MM (24h) time string, or null if empty/invalid. */
+function normTime(t) {
+  if (!t) return null;
+  const m = String(t).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Math.min(23, parseInt(m[1], 10));
+  const min = Math.min(59, parseInt(m[2], 10));
+  return String(h).padStart(2, '0') + ':' + String(min).padStart(2, '0');
+}
+/** Normalize a positive integer duration in minutes, or null. */
+function normDuration(d) {
+  const n = parseInt(d, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** POST /api/tasks {title, due_date?, due_time?, duration_min?, contact_id?, external_ref?} */
 router.post('/', async (req, res) => {
-  const { title, due_date, contact_id, external_ref } = req.body || {};
+  const { title, due_date, due_time, duration_min, contact_id, external_ref } = req.body || {};
   if (!title) return res.status(400).json({ error: 'title is required' });
 
   // If linking to a contact, the contact must be touchable by the requester.
@@ -74,19 +89,23 @@ router.post('/', async (req, res) => {
     }
   }
 
+  const time = normTime(due_time);
   const task = {
     id: uid(),
     owner_id: req.user.id, // ISOLATION: owner is always the requester
     title: String(title),
     due_date: due_date || null,
+    due_time: time,
+    // A duration only makes sense alongside a time; default 30 min if a time is set.
+    duration_min: time ? (normDuration(duration_min) || 30) : normDuration(duration_min),
     done: 0,
     contact_id: contact_id || null,
     external_ref: external_ref || null,
     created_at: now(),
   };
   db.prepare(`
-    INSERT INTO tasks (id, owner_id, title, due_date, done, contact_id, external_ref, created_at)
-    VALUES (@id, @owner_id, @title, @due_date, @done, @contact_id, @external_ref, @created_at)
+    INSERT INTO tasks (id, owner_id, title, due_date, due_time, duration_min, done, contact_id, external_ref, created_at)
+    VALUES (@id, @owner_id, @title, @due_date, @due_time, @duration_min, @done, @contact_id, @external_ref, @created_at)
   `).run(task);
 
   // Best-effort Google sync — a failure never blocks the 201 for the saved task.
@@ -134,6 +153,8 @@ router.patch('/:id', (req, res) => {
 
   if ('title' in body) { sets.push('title = @title'); params.title = String(body.title); }
   if ('due_date' in body) { sets.push('due_date = @due_date'); params.due_date = body.due_date || null; }
+  if ('due_time' in body) { sets.push('due_time = @due_time'); params.due_time = normTime(body.due_time); }
+  if ('duration_min' in body) { sets.push('duration_min = @duration_min'); params.duration_min = normDuration(body.duration_min); }
   if ('done' in body) { sets.push('done = @done'); params.done = body.done ? 1 : 0; }
   if ('external_ref' in body) { sets.push('external_ref = @external_ref'); params.external_ref = body.external_ref || null; }
   // Reassign the task to another user (yourself or any ACTIVE user). owner_id is
@@ -207,6 +228,28 @@ function icsDateParts(dueDate) {
 }
 
 /**
+ * Floating-local DTSTART/DTEND (YYYYMMDDTHHMMSS, no TZ) for a timed task.
+ * Calendar apps import floating times as the viewer's local time. Returns null
+ * if the date/time can't be parsed.
+ */
+function icsTimedParts(dueDate, dueTime, durationMin) {
+  const tm = String(dueTime).match(/^(\d{1,2}):(\d{2})/);
+  const base = new Date(String(dueDate) + 'T00:00:00');
+  if (!tm || isNaN(base.getTime())) return null;
+  const startD = new Date(base.getFullYear(), base.getMonth(), base.getDate(),
+    parseInt(tm[1], 10), parseInt(tm[2], 10), 0);
+  const dur = (Number.isFinite(durationMin) && durationMin > 0) ? durationMin : 30;
+  const endD = new Date(startD.getTime() + dur * 60000);
+  const fmt = (d) =>
+    String(d.getFullYear()) +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    String(d.getDate()).padStart(2, '0') + 'T' +
+    String(d.getHours()).padStart(2, '0') +
+    String(d.getMinutes()).padStart(2, '0') + '00';
+  return { startDT: fmt(startD), endDT: fmt(endD) };
+}
+
+/**
  * GET /api/tasks/export.ics
  * Emits VEVENT (all-day) entries — VTODO is ignored by Google Calendar, so we
  * export each task as a calendar event whose title is the task name. Tasks with
@@ -234,7 +277,6 @@ router.get('/export.ics', (req, res) => {
   ];
 
   for (const t of rows) {
-    const { start, end } = icsDateParts(t.due_date);
     // Task name is the event title; append the linked contact if present.
     const summary = t.contact_name
       ? `${t.title} — ${t.contact_name}`
@@ -243,14 +285,24 @@ router.get('/export.ics', (req, res) => {
     if (t.contact_name) descBits.push(`Contact: ${t.contact_name}`);
     if (!t.due_date) descBits.push('(no due date set — placed on today)');
 
+    // Timed event when a start time is set; otherwise an all-day event.
+    const timed = (t.due_date && t.due_time)
+      ? icsTimedParts(t.due_date, t.due_time, t.duration_min) : null;
+
     lines.push('BEGIN:VEVENT');
     lines.push(`UID:${t.id}@wholesale-crm`);
     lines.push(`DTSTAMP:${stamp}`);
-    lines.push(`DTSTART;VALUE=DATE:${start}`);
-    lines.push(`DTEND;VALUE=DATE:${end}`);
+    if (timed) {
+      lines.push(`DTSTART:${timed.startDT}`);
+      lines.push(`DTEND:${timed.endDT}`);
+    } else {
+      const { start, end } = icsDateParts(t.due_date);
+      lines.push(`DTSTART;VALUE=DATE:${start}`);
+      lines.push(`DTEND;VALUE=DATE:${end}`);
+    }
     lines.push(`SUMMARY:${icsEscape(summary)}`);
     lines.push(`DESCRIPTION:${icsEscape(descBits.join(' — '))}`);
-    lines.push('TRANSP:TRANSPARENT'); // all-day, doesn't block time
+    if (!timed) lines.push('TRANSP:TRANSPARENT'); // all-day doesn't block time
     lines.push('END:VEVENT');
   }
   lines.push('END:VCALENDAR');

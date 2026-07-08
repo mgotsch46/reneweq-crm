@@ -25,6 +25,10 @@ const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 const GOOGLE_TASKS_URL = 'https://tasks.googleapis.com/tasks/v1/lists/@default/tasks';
 const GOOGLE_CAL_EVENTS_URL = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 
+// Wall-clock time zone used for timed task events (task times are entered as
+// local time). Override with CRM_TIMEZONE (an IANA name, e.g. America/New_York).
+const CAL_TZ = process.env.CRM_TIMEZONE || 'America/Denver';
+
 const SCOPES = 'openid email https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/calendar.events';
 
 const clientId = () => process.env.GOOGLE_CLIENT_ID || '';
@@ -151,16 +155,40 @@ async function pushTaskToGoogle(uid, task) {
       out.error = e.message;
     }
 
-    // --- Google Calendar (all-day event, only when there is a due date) -----
+    // --- Google Calendar --------------------------------------------------
+    // Timed event when the task has a start time; otherwise an all-day event.
+    // Only pushed when there is a due date.
     if (dueDate) {
       try {
-        const event = {
-          summary: task.title || 'CRM task',
-          description: 'From Wholesale REI CRM',
-          start: { date: dueDate },
-          end: { date: dueDate },
-          reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
-        };
+        const tm = task.due_time ? String(task.due_time).match(/^(\d{1,2}):(\d{2})/) : null;
+        let event;
+        if (tm) {
+          const hh = String(Math.min(23, parseInt(tm[1], 10))).padStart(2, '0');
+          const mm = String(Math.min(59, parseInt(tm[2], 10))).padStart(2, '0');
+          const dur = (Number.isFinite(task.duration_min) && task.duration_min > 0)
+            ? task.duration_min : 30;
+          const [Y, Mo, D] = dueDate.split('-').map((n) => parseInt(n, 10));
+          const startMs = Date.UTC(Y, Mo - 1, D, parseInt(hh, 10), parseInt(mm, 10), 0);
+          const e = new Date(startMs + dur * 60000); // read back as UTC wall clock
+          const pad = (n) => String(n).padStart(2, '0');
+          const endLocal = `${e.getUTCFullYear()}-${pad(e.getUTCMonth() + 1)}-${pad(e.getUTCDate())}` +
+            `T${pad(e.getUTCHours())}:${pad(e.getUTCMinutes())}:00`;
+          event = {
+            summary: task.title || 'CRM task',
+            description: 'From Wholesale REI CRM',
+            start: { dateTime: `${dueDate}T${hh}:${mm}:00`, timeZone: CAL_TZ },
+            end: { dateTime: endLocal, timeZone: CAL_TZ },
+            reminders: { useDefault: true },
+          };
+        } else {
+          event = {
+            summary: task.title || 'CRM task',
+            description: 'From Wholesale REI CRM',
+            start: { date: dueDate },
+            end: { date: dueDate },
+            reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
+          };
+        }
         const res = await fetch(GOOGLE_CAL_EVENTS_URL, { method: 'POST', headers, body: JSON.stringify(event) });
         const data = await res.json().catch(() => null);
         if (res.ok && data && data.id) out.eventId = data.id;
