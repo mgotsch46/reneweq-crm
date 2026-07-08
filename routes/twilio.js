@@ -27,6 +27,10 @@ const router = express.Router();
 
 const VM_DIR = path.join(DATA_DIR, 'uploads', 'rvm'); // shared with routes/rvm.js audio store
 
+// Web push (optional) — defensive so a push/module issue never breaks webhooks.
+let sendPushToUser = function () {};
+try { sendPushToUser = require('./push').sendPushToUser; } catch (e) { /* push not available */ }
+
 const ACCOUNT_SID = () => process.env.TWILIO_ACCOUNT_SID || '';
 const API_KEY_SID = () => process.env.TWILIO_API_KEY_SID || '';
 const API_KEY_SECRET = () => process.env.TWILIO_API_KEY_SECRET || '';
@@ -260,6 +264,13 @@ router.post('/voicemail', async (req, res) => {
         provider_id: stored ? recId : recSid, created_at: now(),
       });
       try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
+      try {
+        const label = db.prepare('SELECT name FROM contacts WHERE id = ?').get(contact.id);
+        sendPushToUser(contact.owner_id, {
+          title: 'New voicemail' + (label && label.name ? ' from ' + label.name : ''),
+          body: 'Missed call — tap to listen', url: '/', tag: 'vm-' + contact.id,
+        });
+      } catch (e) {}
     } else if (recUrl && !contact) {
       console.log('[twilio] voicemail from unknown number:', from);
     }
@@ -334,6 +345,14 @@ router.post('/sms-inbound', (req, res) => {
         body: String(bodyText), status: 'received', providerId: sid, createdBy: contact.owner_id,
       });
       try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
+      // Push alert to the contact's owner.
+      try {
+        const label = db.prepare('SELECT name FROM contacts WHERE id = ?').get(contact.id);
+        sendPushToUser(contact.owner_id, {
+          title: 'New text' + (label && label.name ? ' from ' + label.name : ''),
+          body: String(bodyText).slice(0, 140), url: '/', tag: 'sms-' + contact.id,
+        });
+      } catch (e) {}
     } else {
       console.log('[twilio] inbound SMS from unknown number:', from);
     }

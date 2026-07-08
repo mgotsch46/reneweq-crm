@@ -146,6 +146,30 @@ router.post('/voicemails/:activityId/read', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+/** GET /api/inbox/unread — all unread inbound activity (texts + calls + voicemails). */
+router.get('/inbox/unread', requireAuth, (req, res) => {
+  const admin = isAdmin(req.user);
+  const rows = db.prepare(
+    "SELECT a.id, a.contact_id, a.type, a.body, a.created_at, a.provider_id, c.name AS contactName, c.phone" +
+    " FROM activities a JOIN contacts c ON c.id = a.contact_id" +
+    " WHERE a.direction = 'inbound' AND a.type IN ('sms','rvm','call') AND a.read_at IS NULL" +
+    (admin ? '' : ' AND a.owner_id = @uid') +
+    ' ORDER BY a.created_at DESC LIMIT 100'
+  ).all(admin ? {} : { uid: req.user.id });
+  res.json({ count: rows.length, items: rows });
+});
+
+/** POST /api/activities/:id/read {read:true|false} — toggle an inbound item
+ *  read/unread ("mark viewed" or bump it back to NEW). */
+router.post('/activities/:id/read', requireAuth, (req, res) => {
+  const a = db.prepare("SELECT * FROM activities WHERE id = ?").get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'Activity not found' });
+  if (!isAdmin(req.user) && String(a.owner_id) !== String(req.user.id)) return res.status(404).json({ error: 'Activity not found' });
+  const read = req.body && req.body.read === false ? false : true;
+  db.prepare('UPDATE activities SET read_at = ? WHERE id = ?').run(read ? now() : null, a.id);
+  res.json({ ok: true, read });
+});
+
 function streamRec(r, res) {
   const file = path.join(RVM_DIR, r.stored);
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'Audio missing on server' });
