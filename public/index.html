@@ -75,8 +75,9 @@
 <!-- SOFTPHONE CALL WIDGET (shown during active/incoming Twilio calls) -->
 <div id="callWidget" class="call-widget hidden"></div>
 
-<!-- Twilio Voice SDK (in-browser softphone) -->
-<script src="https://sdk.twilio.com/js/voice/releases/2.11.1/twilio.min.js"></script>
+<!-- Twilio Voice SDK (in-browser softphone) — served via jsDelivr npm mirror
+     (Twilio no longer hosts the v2 SDK on their own CDN). -->
+<script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.11.1/dist/twilio.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
