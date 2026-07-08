@@ -19,7 +19,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
-const { db, uid, now, DATA_DIR } = require('../db');
+const { db, uid, now, DATA_DIR, getSetting } = require('../db');
 const { requireAuth } = require('../auth');
 const { sendSms } = require('../integrations');
 
@@ -193,10 +193,20 @@ router.post('/voice-inbound', (req, res) => {
   );
 });
 
-/** TwiML that greets the caller and records a voicemail. */
+/** TwiML that greets the caller (custom recording or text) and records a voicemail. */
 function voicemailTwiml() {
+  let greeting;
+  const recId = getSetting('vm_greeting_recording_id');
+  if (recId) {
+    const base = (process.env.APP_BASE_URL || 'https://reneweq-crm-production.up.railway.app').replace(/\/+$/, '');
+    greeting = '<Play>' + xmlEscape(base + '/api/rvm/recordings/' + recId + '/public') + '</Play>';
+  } else {
+    const text = getSetting('vm_greeting_text') ||
+      "You've reached RenewEQ. Please leave a message after the tone, then hang up.";
+    greeting = '<Say voice="alice">' + xmlEscape(text) + '</Say>';
+  }
   return '<?xml version="1.0" encoding="UTF-8"?><Response>' +
-    '<Say voice="alice">You\'ve reached RenewEQ. Please leave a message after the tone, then hang up.</Say>' +
+    greeting +
     '<Record maxLength="120" playBeep="true" trim="trim-silence" ' +
     'action="/api/twilio/voicemail" method="POST" ' +
     'transcribe="true" transcribeCallback="/api/twilio/voicemail-transcribe"/>' +

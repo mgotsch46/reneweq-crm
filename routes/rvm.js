@@ -21,7 +21,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { db, uid, now, DATA_DIR, DEFAULT_RVM } = require('../db');
+const { db, uid, now, DATA_DIR, DEFAULT_RVM, getSetting, setSetting } = require('../db');
 const { requireAuth } = require('../auth');
 const { isAdmin, renderTemplate } = require('./helpers');
 const { sendRvm, rvmMode, rvmProvider } = require('../integrations');
@@ -74,6 +74,76 @@ function truthy(v) { return v === 1 || v === true || v === '1' || v === 'true'; 
 /** GET /api/rvm/status — is RVM delivery live, and via which provider? */
 router.get('/rvm/status', requireAuth, (req, res) => {
   res.json({ mode: rvmMode(), provider: rvmProvider(), baseUrl: appBaseUrl(req) });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound voicemail GREETING (what callers hear). Org-wide (shared number),
+// admin-managed: a typed greeting (spoken by the system) and/or a recorded
+// voice greeting that plays to callers.
+// ---------------------------------------------------------------------------
+
+/** GET /api/settings/vm-greeting — current greeting config. */
+router.get('/settings/vm-greeting', requireAuth, (req, res) => {
+  const recId = getSetting('vm_greeting_recording_id') || null;
+  res.json({
+    text: getSetting('vm_greeting_text') || '',
+    recordingId: recId,
+    hasAudio: !!recId,
+  });
+});
+
+/** POST /api/settings/vm-greeting {text} — save the spoken greeting text. */
+router.post('/settings/vm-greeting', requireAuth, (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+  const text = (req.body && req.body.text != null) ? String(req.body.text).slice(0, 500) : '';
+  setSetting('vm_greeting_text', text);
+  res.json({ ok: true, text });
+});
+
+/** POST /api/settings/vm-greeting/recording {mime, dataBase64} — record/upload a voice greeting. */
+router.post('/settings/vm-greeting/recording', requireAuth, (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+  const { mime, dataBase64, duration_ms } = req.body || {};
+  if (!dataBase64) return res.status(400).json({ error: 'dataBase64 is required' });
+  let buf;
+  try { buf = Buffer.from(String(dataBase64).replace(/^data:[^;]*;base64,/, ''), 'base64'); }
+  catch (e) { return res.status(400).json({ error: 'Invalid audio data' }); }
+  if (!buf.length) return res.status(400).json({ error: 'Empty recording' });
+  if (buf.length > MAX_BYTES) return res.status(413).json({ error: 'Recording too large (max 10 MB)' });
+
+  // Remove any previous greeting recording (file + row).
+  const oldId = getSetting('vm_greeting_recording_id');
+  if (oldId) {
+    const old = db.prepare('SELECT stored FROM rvm_recordings WHERE id = ?').get(oldId);
+    if (old) { try { fs.unlinkSync(path.join(RVM_DIR, old.stored)); } catch (e) {} }
+    try { db.prepare('DELETE FROM rvm_recordings WHERE id = ?').run(oldId); } catch (e) {}
+  }
+
+  const id = uid();
+  const stored = id + '.' + extFor(mime);
+  try { fs.mkdirSync(RVM_DIR, { recursive: true }); } catch (e) {}
+  try { fs.writeFileSync(path.join(RVM_DIR, stored), buf); }
+  catch (e) { return res.status(500).json({ error: 'Could not save recording' }); }
+  db.prepare(`INSERT INTO rvm_recordings (id, owner_id, contact_id, label, stored, mime, size, duration_ms, direction, created_by, created_at)
+    VALUES (@id,@owner_id,NULL,'Voicemail greeting',@stored,@mime,@size,@dur,'greeting',@owner_id,@created_at)`).run({
+    id, owner_id: req.user.id, stored, mime: mime ? String(mime).slice(0, 80) : 'audio/wav',
+    size: buf.length, dur: Number(duration_ms) || null, created_at: now(),
+  });
+  setSetting('vm_greeting_recording_id', id);
+  res.status(201).json({ ok: true, recordingId: id });
+});
+
+/** DELETE /api/settings/vm-greeting/recording — remove the voice greeting. */
+router.delete('/settings/vm-greeting/recording', requireAuth, (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
+  const oldId = getSetting('vm_greeting_recording_id');
+  if (oldId) {
+    const old = db.prepare('SELECT stored FROM rvm_recordings WHERE id = ?').get(oldId);
+    if (old) { try { fs.unlinkSync(path.join(RVM_DIR, old.stored)); } catch (e) {} }
+    try { db.prepare('DELETE FROM rvm_recordings WHERE id = ?').run(oldId); } catch (e) {}
+  }
+  setSetting('vm_greeting_recording_id', '');
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
