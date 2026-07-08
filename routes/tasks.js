@@ -10,6 +10,7 @@ const express = require('express');
 const { db, uid, now } = require('../db');
 const { ownerScope, canTouch } = require('./helpers');
 const google = require('./google'); // Google Tasks/Calendar sync (best-effort)
+const microsoft = require('./microsoft'); // Microsoft To Do/Outlook sync (best-effort)
 
 const router = express.Router();
 
@@ -59,6 +60,23 @@ async function syncTaskToGoogle(ownerId, task) {
     `).run({ gt: g.taskId, ge: g.eventId, id: task.id });
   }
   return g || { taskId: null, eventId: null, error: 'push failed' };
+}
+
+/**
+ * Push a task to Microsoft (To Do + Outlook) and persist the returned ids.
+ * Best-effort: returns the push result; never throws into the request.
+ */
+async function syncTaskToMicrosoft(ownerId, task) {
+  const m = await microsoft.pushTaskToMicrosoft(ownerId, task);
+  if (m && (m.todoId || m.eventId)) {
+    db.prepare(`
+      UPDATE tasks SET
+        ms_todo_id  = COALESCE(@mt, ms_todo_id),
+        ms_event_id = COALESCE(@me, ms_event_id)
+      WHERE id = @id
+    `).run({ mt: m.todoId, me: m.eventId, id: task.id });
+  }
+  return m || { todoId: null, eventId: null, error: 'push failed' };
 }
 
 /** Normalize an HH:MM (24h) time string, or null if empty/invalid. */
@@ -118,6 +136,16 @@ router.post('/', async (req, res) => {
   } catch (e) {
     console.error('[google] task sync failed:', e.message);
   }
+  // Best-effort Microsoft sync — independent of Google; also never blocks.
+  task.ms_todo_id = null;
+  task.ms_event_id = null;
+  try {
+    const m = await syncTaskToMicrosoft(task.owner_id, task);
+    task.ms_todo_id = m.todoId || null;
+    task.ms_event_id = m.eventId || null;
+  } catch (e) {
+    console.error('[microsoft] task sync failed:', e.message);
+  }
   res.status(201).json(task);
 });
 
@@ -138,6 +166,27 @@ router.post('/:id/push-google', async (req, res) => {
   }
   if (!g.taskId && !g.eventId) {
     return res.status(400).json({ error: g.error || 'Could not push task to Google' });
+  }
+  res.json(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id));
+});
+
+/**
+ * POST /api/tasks/:id/push-microsoft — manually push/re-push a task to
+ * Microsoft To Do + Outlook Calendar. Owner-scoped.
+ */
+router.post('/:id/push-microsoft', async (req, res) => {
+  const task = getOwnedTask(req.params.id, req.user); // isolation check
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+
+  let m;
+  try {
+    m = await syncTaskToMicrosoft(task.owner_id, task); // owner's Microsoft account
+  } catch (e) {
+    console.error('[microsoft] push-microsoft failed:', e.message);
+    return res.status(502).json({ error: 'Could not reach Microsoft' });
+  }
+  if (!m.todoId && !m.eventId) {
+    return res.status(400).json({ error: m.error || 'Could not push task to Microsoft' });
   }
   res.json(db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id));
 });
@@ -179,9 +228,10 @@ router.patch('/:id', (req, res) => {
   db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = @id`).run(params);
   const updated = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
 
-  // Best-effort: mark the synced Google Task completed (fire-and-forget).
-  if ('done' in body && body.done && updated.google_task_id) {
-    google.completeTaskGoogle(updated.owner_id, updated).catch(() => {});
+  // Best-effort: mark the synced items completed on each provider (fire-and-forget).
+  if ('done' in body && body.done) {
+    if (updated.google_task_id) google.completeTaskGoogle(updated.owner_id, updated).catch(() => {});
+    if (updated.ms_todo_id) microsoft.completeTaskMicrosoft(updated.owner_id, updated).catch(() => {});
   }
   res.json(updated);
 });
@@ -191,8 +241,9 @@ router.delete('/:id', (req, res) => {
   const task = getOwnedTask(req.params.id, req.user); // isolation check
   if (!task) return res.status(404).json({ error: 'Task not found' });
   db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
-  // Best-effort: remove the synced Google Task/event too (fire-and-forget).
+  // Best-effort: remove the synced items on each provider (fire-and-forget).
   google.deleteTaskGoogle(task.owner_id, task).catch(() => {});
+  microsoft.deleteTaskMicrosoft(task.owner_id, task).catch(() => {});
   res.json({ ok: true, deleted: task.id });
 });
 
