@@ -1742,9 +1742,11 @@ function renderTeam() {
     '</div>';
 
   html += '<div class="tablewrap"><table><thead><tr>' +
-    '<th>Name</th><th>Email</th><th>Role</th><th>Contacts</th><th>Open Tasks</th><th>Status</th></tr></thead><tbody>';
+    '<th>Name</th><th>Email</th><th>Role</th><th>Contacts</th><th>Open Tasks</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   state.users.forEach(function (u) {
     const isSelf = state.user && String(u.id) === String(state.user.id);
+    const contacts = (u.contact_count !== undefined) ? u.contact_count : (u.contactCount !== undefined ? u.contactCount : '');
+    const openTasks = (u.open_task_count !== undefined) ? u.open_task_count : (u.openTaskCount !== undefined ? u.openTaskCount : '');
     html += '<tr data-id="' + escAttr(u.id) + '">' +
       '<td>' + esc(u.name) + (isSelf ? ' <span class="tag blue">you</span>' : '') + '</td>' +
       '<td>' + esc(u.email) + '</td>' +
@@ -1752,12 +1754,26 @@ function renderTeam() {
       '<option value="user"' + (u.role === 'user' ? ' selected' : '') + '>user</option>' +
       '<option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>admin</option>' +
       '</select></td>' +
-      '<td>' + esc(u.contactCount !== undefined ? u.contactCount : '') + '</td>' +
-      '<td>' + esc(u.openTaskCount !== undefined ? u.openTaskCount : '') + '</td>' +
+      '<td>' + esc(String(contacts)) + '</td>' +
+      '<td>' + esc(String(openTasks)) + '</td>' +
       '<td><label class="toggle"><input type="checkbox" data-active' +
       (truthy(u.active) ? ' checked' : '') + (isSelf ? ' disabled' : '') + '> ' +
       (truthy(u.active) ? 'Active' : 'Inactive') + '</label></td>' +
-      '</tr>';
+      '<td class="nowrap">' +
+      '<button class="btn ghost small" data-edit-user>Edit</button> ' +
+      (isSelf ? '' : '<button class="btn ghost small" data-del-user title="Permanently remove this user; their contacts/tasks are reassigned to you">Delete</button>') +
+      '</td>' +
+      '</tr>' +
+      // Hidden inline editor for this user (name / email / optional new password).
+      '<tr class="editrow" data-editrow style="display:none"><td colspan="7">' +
+      '<div class="taskform">' +
+      '<div class="field" style="flex:1"><label>Name</label><input type="text" data-eu-name value="' + escAttr(u.name) + '"></div>' +
+      '<div class="field" style="flex:1"><label>Email</label><input type="email" data-eu-email value="' + escAttr(u.email) + '"></div>' +
+      '<div class="field" style="flex:1"><label>New password (optional)</label><input type="password" data-eu-pass placeholder="leave blank to keep"></div>' +
+      '<button class="btn small" data-eu-save>Save</button>' +
+      '<button class="btn ghost small" data-eu-cancel>Cancel</button>' +
+      '</div>' +
+      '</td></tr>';
   });
   html += '</tbody></table></div>';
   root.innerHTML = html;
@@ -1776,10 +1792,13 @@ function renderTeam() {
     } catch (e) { toastErr(e); }
   });
 
-  $all('tbody tr', root).forEach(function (tr) {
+  $all('tbody tr[data-id]', root).forEach(function (tr) {
     const id = tr.getAttribute('data-id');
+    const editRow = tr.nextElementSibling && tr.nextElementSibling.hasAttribute('data-editrow')
+      ? tr.nextElementSibling : null;
+
     const roleSel = $('[data-role]', tr);
-    roleSel.addEventListener('change', async function () {
+    if (roleSel) roleSel.addEventListener('change', async function () {
       try {
         await api('PATCH', '/users/' + encodeURIComponent(id), { role: roleSel.value });
         toast('Role updated', 'ok');
@@ -1792,7 +1811,7 @@ function renderTeam() {
       }
     });
     const activeCb = $('[data-active]', tr);
-    activeCb.addEventListener('change', async function () {
+    if (activeCb) activeCb.addEventListener('change', async function () {
       try {
         await api('PATCH', '/users/' + encodeURIComponent(id), { active: activeCb.checked });
         toast(activeCb.checked ? 'User activated' : 'User deactivated', 'ok');
@@ -1803,6 +1822,45 @@ function renderTeam() {
         await refreshUsers().catch(function () {});
         renderTeam();
       }
+    });
+
+    // ---- Edit (toggle inline editor)
+    const editBtn = $('[data-edit-user]', tr);
+    if (editBtn && editRow) editBtn.addEventListener('click', function () {
+      editRow.style.display = editRow.style.display === 'none' ? '' : 'none';
+    });
+    const cancelBtn = editRow ? $('[data-eu-cancel]', editRow) : null;
+    if (cancelBtn) cancelBtn.addEventListener('click', function () { editRow.style.display = 'none'; });
+    const saveBtn = editRow ? $('[data-eu-save]', editRow) : null;
+    if (saveBtn) saveBtn.addEventListener('click', async function () {
+      const name = $('[data-eu-name]', editRow).value.trim();
+      const email = $('[data-eu-email]', editRow).value.trim();
+      const pass = $('[data-eu-pass]', editRow).value;
+      if (!name || !email) { toast('Name and email are required.', 'error'); return; }
+      const body = { name: name, email: email };
+      if (pass) body.password = pass;
+      saveBtn.disabled = true;
+      try {
+        await api('PATCH', '/users/' + encodeURIComponent(id), body);
+        toast('User updated', 'ok');
+        await refreshUsers();
+        renderTeam();
+      } catch (e) { toastErr(e); saveBtn.disabled = false; }
+    });
+
+    // ---- Delete (with confirmation)
+    const delBtn = $('[data-del-user]', tr);
+    if (delBtn) delBtn.addEventListener('click', async function () {
+      const nameCell = $('td', tr);
+      const label = nameCell ? nameCell.textContent.replace(' you', '').trim() : 'this user';
+      if (!window.confirm('Permanently delete ' + label + '?\n\nTheir contacts, tasks and activity will be reassigned to you. This cannot be undone.')) return;
+      delBtn.disabled = true;
+      try {
+        await api('DELETE', '/users/' + encodeURIComponent(id));
+        toast('User deleted', 'ok');
+        await refreshUsers();
+        renderTeam();
+      } catch (e) { toastErr(e); delBtn.disabled = false; }
     });
   });
 }
