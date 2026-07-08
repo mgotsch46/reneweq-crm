@@ -16,12 +16,16 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const jwt = require('jsonwebtoken');
-const { db, uid, now } = require('../db');
+const { db, uid, now, DATA_DIR } = require('../db');
 const { requireAuth } = require('../auth');
 const { sendSms } = require('../integrations');
 
 const router = express.Router();
+
+const VM_DIR = path.join(DATA_DIR, 'uploads', 'rvm'); // shared with routes/rvm.js audio store
 
 const ACCOUNT_SID = () => process.env.TWILIO_ACCOUNT_SID || '';
 const API_KEY_SID = () => process.env.TWILIO_API_KEY_SID || '';
@@ -174,13 +178,117 @@ router.post('/voice-inbound', (req, res) => {
     targetUserId = admin ? admin.id : null;
   }
   if (!targetUserId) {
-    return res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No agent available. Please leave a message after the tone.</Say><Record maxLength="120"/></Response>');
+    // No agent to ring → go straight to voicemail.
+    return res.send(voicemailTwiml());
   }
   const identity = xmlEscape(identityFor(targetUserId));
+  // Ring the browser client; if it isn't answered, `action` drops to voicemail.
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    `<Response><Dial answerOnBridge="true" timeout="25"><Client>${identity}</Client></Dial></Response>`
+    `<Response><Dial answerOnBridge="true" timeout="25" action="/api/twilio/voice-inbound-fallback" method="POST"><Client>${identity}</Client></Dial></Response>`
   );
+});
+
+/** TwiML that greets the caller and records a voicemail. */
+function voicemailTwiml() {
+  return '<?xml version="1.0" encoding="UTF-8"?><Response>' +
+    '<Say voice="alice">You\'ve reached RenewEQ. Please leave a message after the tone, then hang up.</Say>' +
+    '<Record maxLength="120" playBeep="true" trim="trim-silence" ' +
+    'action="/api/twilio/voicemail" method="POST" ' +
+    'transcribe="true" transcribeCallback="/api/twilio/voicemail-transcribe"/>' +
+    '<Say voice="alice">We did not receive a recording. Goodbye.</Say>' +
+    '</Response>';
+}
+
+/**
+ * POST /api/twilio/voice-inbound-fallback — Twilio calls this after the Dial
+ * finishes. If the browser client didn't answer, record a voicemail.
+ */
+router.post('/voice-inbound-fallback', (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  const status = (req.body && req.body.DialCallStatus) || '';
+  if (status === 'completed') {
+    // Call was answered — nothing more to do.
+    return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  }
+  res.send(voicemailTwiml());
+});
+
+/**
+ * POST /api/twilio/voicemail — the <Record> action. Downloads the recording
+ * from Twilio, stores it on the volume, and logs it to the matching contact's
+ * Activity Log as an unread inbound voicemail.
+ */
+router.post('/voicemail', async (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  try {
+    const b = req.body || {};
+    const from = b.From || b.Caller || '';
+    const recUrl = b.RecordingUrl || '';
+    const recSid = b.RecordingSid || null;
+    const dur = parseInt(b.RecordingDuration, 10) || null;
+    const contact = findContactByPhone(from);
+    if (recUrl && contact) {
+      // Download the audio from Twilio (Basic auth) and store on the volume.
+      let stored = null;
+      try {
+        const sid = ACCOUNT_SID();
+        const auth = Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+        const r = await fetch(recUrl + '.mp3', { headers: { Authorization: `Basic ${auth}` } });
+        if (r.ok) {
+          const buf = Buffer.from(await r.arrayBuffer());
+          try { fs.mkdirSync(VM_DIR, { recursive: true }); } catch (e) {}
+          stored = (recSid || uid()) + '.mp3';
+          fs.writeFileSync(path.join(VM_DIR, stored), buf);
+        }
+      } catch (e) { console.error('[twilio] voicemail download failed:', e.message); }
+
+      const recId = uid();
+      if (stored) {
+        db.prepare(`INSERT INTO rvm_recordings (id, owner_id, contact_id, label, stored, mime, size, duration_ms, direction, twilio_sid, created_by, created_at)
+          VALUES (@id,@owner_id,@contact_id,@label,@stored,'audio/mpeg',@size,@dur,'inbound',@sid,@owner_id,@created_at)`).run({
+          id: recId, owner_id: contact.owner_id, contact_id: contact.id,
+          label: 'Voicemail from ' + (from || 'caller'), stored,
+          size: null, dur: dur ? dur * 1000 : null, sid: recSid, created_at: now(),
+        });
+      }
+      // Log the inbound voicemail to the contact's Activity Log (unread).
+      db.prepare(`INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, provider_id, created_by, created_at)
+        VALUES (@id,@contact_id,@owner_id,'rvm','automated','inbound',@body,'received',@provider_id,@owner_id,@created_at)`).run({
+        id: uid(), contact_id: contact.id, owner_id: contact.owner_id,
+        body: 'Voicemail from ' + (from || 'caller') + (dur ? ' (' + dur + 's)' : ''),
+        provider_id: stored ? recId : recSid, created_at: now(),
+      });
+      try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
+    } else if (recUrl && !contact) {
+      console.log('[twilio] voicemail from unknown number:', from);
+    }
+  } catch (e) {
+    console.error('[twilio] voicemail handler error:', e.message);
+  }
+  res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Thank you. Goodbye.</Say><Hangup/></Response>');
+});
+
+/**
+ * POST /api/twilio/voicemail-transcribe — async transcription callback.
+ * Appends the transcribed text to the matching voicemail activity.
+ */
+router.post('/voicemail-transcribe', (req, res) => {
+  try {
+    const b = req.body || {};
+    const text = b.TranscriptionText || '';
+    const recSid = b.RecordingSid || null;
+    if (text && recSid) {
+      const rec = db.prepare('SELECT id FROM rvm_recordings WHERE twilio_sid = ?').get(recSid);
+      const providerId = rec ? rec.id : recSid;
+      const act = db.prepare("SELECT id, body FROM activities WHERE provider_id = ? AND type = 'rvm' AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1").get(providerId);
+      if (act) {
+        db.prepare('UPDATE activities SET body = ? WHERE id = ?').run((act.body || '') + ' — "' + text + '"', act.id);
+      }
+    }
+  } catch (e) { console.error('[twilio] transcribe callback error:', e.message); }
+  res.set('Content-Type', 'text/xml');
+  res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
 });
 
 /**

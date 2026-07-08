@@ -109,12 +109,41 @@ router.post('/contacts/:id/rvm/recordings', requireAuth, (req, res) => {
   res.status(201).json(recPublic(row));
 });
 
-/** GET /api/contacts/:id/rvm/recordings — clips for this contact (newest first). */
+/** GET /api/contacts/:id/rvm/recordings — OUTBOUND clips for this contact only
+ *  (inbound voicemails live in the Activity Log, not the drop dropdown). */
 router.get('/contacts/:id/rvm/recordings', requireAuth, (req, res) => {
   const contact = contactFor(req.params.id, req.user);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
-  const rows = db.prepare('SELECT * FROM rvm_recordings WHERE contact_id = ? ORDER BY created_at DESC').all(contact.id);
+  const rows = db.prepare(
+    "SELECT * FROM rvm_recordings WHERE contact_id = ? AND (direction IS NULL OR direction = 'outbound') ORDER BY created_at DESC"
+  ).all(contact.id);
   res.json(rows.map(recPublic));
+});
+
+// ---------------------------------------------------------------------------
+// Inbound voicemails: unread count + mark-as-read (owner-scoped).
+// ---------------------------------------------------------------------------
+
+/** GET /api/voicemails/unread — unlistened inbound voicemails for this user. */
+router.get('/voicemails/unread', requireAuth, (req, res) => {
+  const admin = isAdmin(req.user);
+  const rows = db.prepare(
+    "SELECT a.id, a.contact_id, a.body, a.created_at, a.provider_id, c.name AS contactName, c.phone" +
+    " FROM activities a JOIN contacts c ON c.id = a.contact_id" +
+    " WHERE a.type = 'rvm' AND a.direction = 'inbound' AND a.read_at IS NULL" +
+    (admin ? '' : ' AND a.owner_id = @uid') +
+    ' ORDER BY a.created_at DESC LIMIT 100'
+  ).all(admin ? {} : { uid: req.user.id });
+  res.json({ count: rows.length, items: rows });
+});
+
+/** POST /api/voicemails/:activityId/read — mark an inbound voicemail listened. */
+router.post('/voicemails/:activityId/read', requireAuth, (req, res) => {
+  const a = db.prepare("SELECT * FROM activities WHERE id = ? AND type = 'rvm' AND direction = 'inbound'").get(req.params.activityId);
+  if (!a) return res.status(404).json({ error: 'Voicemail not found' });
+  if (!isAdmin(req.user) && String(a.owner_id) !== String(req.user.id)) return res.status(404).json({ error: 'Voicemail not found' });
+  db.prepare('UPDATE activities SET read_at = ? WHERE id = ?').run(now(), a.id);
+  res.json({ ok: true });
 });
 
 function streamRec(r, res) {
