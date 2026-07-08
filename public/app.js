@@ -26,6 +26,7 @@ const state = {
   google: null, // {configured, connected, email} from /api/google/status
   microsoft: null, // {configured, connected, email} from /api/microsoft/status
   twilio: { status: null, device: null, call: null, incoming: null, muted: false, seconds: 0, timer: null, contactId: null, contactName: '', number: '', direction: 'outbound', note: '' },
+  pipelineSearch: '', // live filter on the Pipeline board (name/phone/email/address)
   tab: 'pipeline',
   contactSearch: '',
   contactList: null, // server-filtered list for the Contacts view
@@ -551,33 +552,59 @@ function switchTab(tab) {
 
 function renderPipeline() {
   const root = $('#view-pipeline');
-  let html = '' +
+  root.innerHTML = '' +
     '<div class="viewhead">' +
     '  <h2>Pipeline</h2>' +
     '  <button class="btn" id="npBtn">+ New Contact</button>' +
     '  <button class="btn blue" id="alBtn">+ Add Lead</button>' +
+    '  <input class="search big" id="pipeSearch" type="search" placeholder="Search name, phone, email, or address…" value="' + escAttr(state.pipelineSearch || '') + '">' +
     '  <span class="hint">Drag cards between stages to update.</span>' +
     '</div>' +
-    '<div class="board" id="board">';
-
-  STAGES.forEach(function (stage) {
-    const cards = state.contacts.filter(function (c) { return (c.stage || STAGES[0]) === stage; });
-    html += '<div class="col" data-stage="' + escAttr(stage) + '">' +
-      '<h3><span>' + esc(stage) + '</span><span class="count">' + cards.length + '</span></h3>' +
-      '<div class="cards" data-stage="' + escAttr(stage) + '">';
-    cards.forEach(function (c) {
-      html += pipelineCardHtml(c);
-    });
-    html += '</div></div>';
-  });
-  html += '</div>';
-  root.innerHTML = html;
+    '<div class="board" id="board"></div>';
 
   $('#npBtn').addEventListener('click', function () { openContactModal(null); });
   $('#alBtn').addEventListener('click', openLeadIntake);
 
+  const search = $('#pipeSearch');
+  if (search) {
+    search.addEventListener('input', function () {
+      state.pipelineSearch = this.value;
+      renderPipelineBoard(); // re-render only the board so the input keeps focus
+    });
+  }
+
+  renderPipelineBoard();
+}
+
+/** True if a contact matches the live pipeline search (name/phone/email/address). */
+function pipelineMatches(c, q) {
+  const needle = String(q || '').trim().toLowerCase();
+  if (!needle) return true;
+  return [c.name, c.phone, c.email, c.property].some(function (v) {
+    return String(v || '').toLowerCase().indexOf(needle) !== -1;
+  });
+}
+
+/** Render (or re-render) just the pipeline board columns + wiring. */
+function renderPipelineBoard() {
+  const board = $('#board');
+  if (!board) return;
+  const q = state.pipelineSearch || '';
+  let html = '';
+  STAGES.forEach(function (stage) {
+    const cards = state.contacts.filter(function (c) {
+      return (c.stage || STAGES[0]) === stage && pipelineMatches(c, q);
+    });
+    html += '<div class="col" data-stage="' + escAttr(stage) + '">' +
+      '<h3><span>' + esc(stage) + '</span><span class="count">' + cards.length + '</span></h3>' +
+      '<div class="cards" data-stage="' + escAttr(stage) + '">';
+    cards.forEach(function (c) { html += pipelineCardHtml(c); });
+    html += '</div></div>';
+  });
+  board.innerHTML = html;
+
   // card events
-  $all('.pcard', root).forEach(function (card) {
+  $all('.pcard', board).forEach(function (card) {
     card.addEventListener('click', function () {
       const id = card.getAttribute('data-id');
       const c = state.contacts.find(function (x) { return String(x.id) === String(id); });
@@ -590,12 +617,12 @@ function renderPipeline() {
     });
     card.addEventListener('dragend', function () {
       card.classList.remove('dragging');
-      $all('.col.dragover', root).forEach(function (col) { col.classList.remove('dragover'); });
+      $all('.col.dragover', board).forEach(function (col) { col.classList.remove('dragover'); });
     });
   });
 
   // column drop targets
-  $all('.col', root).forEach(function (col) {
+  $all('.col', board).forEach(function (col) {
     col.addEventListener('dragover', function (ev) {
       ev.preventDefault();
       ev.dataTransfer.dropEffect = 'move';
@@ -613,14 +640,14 @@ function renderPipeline() {
       if (!c || !stage || c.stage === stage) return;
       const prev = c.stage;
       c.stage = stage;
-      renderPipeline(); // optimistic
+      renderPipelineBoard(); // optimistic
       try {
         const updated = await api('PATCH', '/contacts/' + encodeURIComponent(id), { stage: stage });
         if (updated) replaceContact(updated);
         toast('Moved "' + (c.name || 'contact') + '" to ' + stage, 'ok');
       } catch (e) {
         c.stage = prev;
-        renderPipeline();
+        renderPipelineBoard();
         toastErr(e);
       }
     });
@@ -858,6 +885,23 @@ function renderBulkBar() {
   });
 }
 
+/* Phone cell for the Contacts table: the number plus a pink call button that
+   dials through the in-app softphone (NOT the browser's tel: / Google Voice). */
+function phoneCellHtml(c) {
+  var num = c.phone || (truthy(c.isFsbo) ? c.fsboPhone : c.agentPhone) || '';
+  if (!num) return '<span class="hint">—</span>';
+  var canCall = !!(state.twilio && state.twilio.status && state.twilio.status.voiceConfigured);
+  var btn = canCall
+    ? '<button class="callbtn" data-stop="1" data-call="' + escAttr(num) + '"' +
+      ' data-cid="' + escAttr(c.id) + '" data-cname="' + escAttr(c.name || '') + '"' +
+      ' title="Call ' + escAttr(num) + ' with the CRM softphone" aria-label="Call">' +
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">' +
+      '<path d="M6.6 10.8c1.4 2.8 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.3 1l-2.2 2.2z"/></svg>' +
+      '</button>'
+    : '';
+  return '<span class="phonenum" data-stop="1">' + esc(num) + '</span>' + btn;
+}
+
 function renderContactTable(list) {
   var box = $('#contactTable');
   if (!box) return;
@@ -903,7 +947,7 @@ function renderContactTable(list) {
       '<td>' + esc(c.property || '') + '</td>' +
       '<td>' + esc(c.city || '') + '</td>' +
       '<td>' + esc(c.state || '') + '</td>' +
-      '<td>' + esc(c.phone || (truthy(c.isFsbo) ? c.fsboPhone : c.agentPhone) || '') + '</td>' +
+      '<td>' + phoneCellHtml(c) + '</td>' +
       '<td>' + esc(c.stage || '') + '</td>' +
       '<td>' + (c.price !== null && c.price !== undefined && c.price !== '' ? '$' + Number(c.price).toLocaleString() : '<span class="hint">—</span>') + '</td>' +
       '<td>' + (c.daysOnMarket !== null && c.daysOnMarket !== undefined ? esc(c.daysOnMarket) : '<span class="hint">—</span>') + '</td>' +
@@ -952,11 +996,19 @@ function renderContactTable(list) {
 
   $all('tr.rowlink', box).forEach(function (tr) {
     tr.addEventListener('click', function (ev) {
-      if (ev.target && ev.target.getAttribute && ev.target.getAttribute('data-stop')) return;
+      if (ev.target && ev.target.closest && ev.target.closest('[data-stop]')) return;
       var id = tr.getAttribute('data-id');
       var c = (state.contactList || []).find(function (x) { return String(x.id) === String(id); }) ||
         state.contacts.find(function (x) { return String(x.id) === String(id); });
       if (c) openContactModal(c);
+    });
+  });
+
+  // Pink call buttons → dial through the in-app softphone.
+  $all('.callbtn', box).forEach(function (b) {
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      placeCall(b.getAttribute('data-call'), b.getAttribute('data-cid'), b.getAttribute('data-cname'));
     });
   });
 }

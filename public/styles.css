@@ -427,3 +427,16 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 .call-widget .cw-actions{ display:flex; gap:8px; justify-content:flex-end; }
 .btn.danger{ background:#c0392b; border-color:#c0392b; color:#fff; }
 .btn.ghost.danger{ background:transparent; color:#ff6b5e; border-color:rgba(255,107,94,.5); }
+
+/* Pink click-to-call button in the Contacts table phone cell */
+.callbtn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:26px; margin-left:8px; padding:0;
+  border:none; border-radius:50%; cursor:pointer; vertical-align:middle;
+  background:#ff2d78; color:#fff;
+  box-shadow:0 2px 7px rgba(255,45,120,.45);
+  transition:background .12s ease, transform .12s ease;
+}
+.callbtn:hover{ background:#ff4f8f; transform:translateY(-1px); }
+.callbtn:active{ transform:translateY(0); }
+.phonenum{ vertical-align:middle; }
