@@ -115,6 +115,19 @@ const HEADER_MAP = {
   'price change': 'priceChanges',
   'import date': 'importDate',
   'date found': 'dateFound',
+  // --- Zillow export aliases (headers normalized: units in "(...)" stripped) ---
+  'street address': 'property',
+  'property price': 'price',
+  'bedrooms': 'beds',
+  'bathrooms': 'baths',
+  'living area': 'sqft',
+  'number of days on zillow': 'daysOnMarket',
+  'date listed': 'listingDate',
+  'property url': 'sourceUrl',
+  'listing description': 'listingDescription',
+  'price cut amount': '_priceCutAmt',
+  'price cut date': '_priceCutDate',
+  'price was cut': '_priceWasCut',
 };
 
 /** '$34,000' -> 34000; '' -> null (node:sqlite rejects NaN). */
@@ -163,6 +176,11 @@ function mapRow(headers, cells) {
   lead.sourceUrl = str(raw.sourceUrl);
   lead.zillow = lead.sourceUrl; // Listing URL feeds both fields
   lead.zpid = str(raw.zpid);
+  // Zillow listing URLs contain the zpid (…/<zpid>_zpid/) — derive it if not given.
+  if (!lead.zpid && lead.sourceUrl) {
+    const zm = lead.sourceUrl.match(/(\d+)_zpid/);
+    if (zm) lead.zpid = zm[1];
+  }
   lead.listingDescription = str(raw.listingDescription);
   lead.importDate = str(raw.importDate);
   lead.dateFound = str(raw.dateFound);
@@ -171,6 +189,13 @@ function mapRow(headers, cells) {
   let pc = str(raw.priceChanges);
   const pu = str(raw.priceUpdated);
   if (pu) pc = pc ? pc + ' (price updated ' + pu + ')' : '(price updated ' + pu + ')';
+  // Zillow price-cut columns → a price-change note (motivated-seller signal).
+  const cutAmt = str(raw._priceCutAmt);
+  if (cutAmt) {
+    const cutDate = str(raw._priceCutDate);
+    const note = 'Price cut $' + String(cutAmt).replace(/[$,]/g, '') + (cutDate ? ' on ' + cutDate : '');
+    pc = pc ? pc + '; ' + note : note;
+  }
   lead.priceChanges = pc;
 
   // Display name: agent > FSBO owner > Unknown.
@@ -349,7 +374,10 @@ async function syncFromCsv({ csvText, csvUrl, ownerId }) {
   if (table.length < 2) {
     throw httpError(400, 'CSV needs a header row plus at least one data row');
   }
-  const headers = table[0].map((h) => String(h).trim().toLowerCase());
+  // Normalize headers: lower-case, drop parenthetical units like "(USD)" /
+  // "(MM/DD/YYYY)", collapse spaces — so Zillow-style headers map cleanly.
+  const headers = table[0].map((h) =>
+    String(h).trim().toLowerCase().replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').trim());
   if (!headers.some((h) => HEADER_MAP[h])) {
     throw httpError(400, 'No recognized columns in the CSV header row');
   }
