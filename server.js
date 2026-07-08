@@ -26,11 +26,13 @@ const leadEngineRoutes = require('./routes/leadengine');
 const googleRoutes = require('./routes/google');
 const microsoftRoutes = require('./routes/microsoft');
 const twilioRoutes = require('./routes/twilio');
+const documentRoutes = require('./routes/documents');
 const scheduler = require('./scheduler'); // Lead Engine daily auto-import
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// 35mb allows ~25MB document uploads sent as base64 JSON (see routes/documents.js).
+app.use(express.json({ limit: '35mb' }));
 app.use(express.urlencoded({ extended: false })); // Twilio webhooks post form-encoded bodies
 
 // ---------------------------------------------------------------------------
@@ -72,6 +74,10 @@ app.use('/api/microsoft', microsoftRoutes.router);
 // are hit directly by Twilio with no Bearer token; token/sms/status routes
 // apply requireAuth themselves inside routes/twilio.js.
 app.use('/api/twilio', twilioRoutes.router);
+
+// Per-contact document uploads. Defines /contacts/:id/documents and
+// /documents/:docId[/download]; each route applies requireAuth itself.
+app.use('/api', documentRoutes);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);

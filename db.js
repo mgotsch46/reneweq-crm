@@ -163,9 +163,22 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS documents (
+  id          TEXT PRIMARY KEY,
+  contact_id  TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  owner_id    TEXT NOT NULL,
+  filename    TEXT NOT NULL,
+  stored      TEXT NOT NULL,
+  mime        TEXT,
+  size        INTEGER,
+  uploaded_by TEXT,
+  created_at  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_contacts_owner   ON contacts(owner_id);
 CREATE INDEX IF NOT EXISTS idx_activities_contact ON activities(contact_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_owner      ON tasks(owner_id);
+CREATE INDEX IF NOT EXISTS idx_documents_contact ON documents(contact_id);
 `);
 
 // ---------------------------------------------------------------------------
@@ -509,4 +522,4 @@ seed();
 // Exports
 // ---------------------------------------------------------------------------
 
-module.exports = { db, uid, now, STAGES, DEFAULT_TEXTS, DEFAULT_RVM, getSetting, setSetting };
+module.exports = { db, uid, now, DATA_DIR, STAGES, DEFAULT_TEXTS, DEFAULT_RVM, getSetting, setSetting };
