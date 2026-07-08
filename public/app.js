@@ -1255,14 +1255,27 @@ function openContactModal(contact, leadDraft) {
 
   // ---- RVM
   html += '<div class="sec"><h4>Ringless Voicemail</h4>' +
-    '<div class="field"><label>Voicemail script</label>' +
-    '<textarea data-field="rvm" rows="3" placeholder="Voicemail message...">' + esc(c.rvm || '') + '</textarea></div>' +
-    '<div class="actions-row">' +
-    '<button class="btn small" id="dropRvmBtn"' + (isNew || !canRvm ? ' disabled' : '') + '>Drop RVM</button>' +
-    '<label class="pill' + (truthy(c.rvmStatus) ? ' sent' : '') + '" id="rvmPill">' +
-    '<input type="checkbox" disabled' + (truthy(c.rvmStatus) ? ' checked' : '') + '> RVM dropped</label>' +
-    '</div>' +
-    (!isNew && !canRvm ? '<p class="hint">Dropping disabled: ' + (truthy(c.dnc) ? 'contact is marked DNC.' : 'RVM consent not granted.') + '</p>' : '') +
+    '<p class="hint" style="margin:0 0 10px">Record a voicemail and drop it now or schedule it. Delivered ringless via your RVM provider (Slybroadcast / Drop Cowboy). Requires RVM consent; blocked for DNC.</p>' +
+    '<div class="field"><label>Voicemail script (text-to-speech fallback if no recording is selected)</label>' +
+    '<textarea data-field="rvm" rows="2" placeholder="Voicemail message...">' + esc(c.rvm || '') + '</textarea></div>' +
+    (isNew
+      ? '<p class="hint">Save the contact first to record and send voicemails.</p>'
+      : '<div class="rvmrec">' +
+        '  <button type="button" class="btn small" id="rvmRecBtn">● Record</button>' +
+        '  <button type="button" class="btn ghost small" id="rvmStopBtn" disabled>■ Stop</button>' +
+        '  <span class="hint" id="rvmRecStatus"></span>' +
+        '  <audio id="rvmPreview" controls style="display:none;max-width:220px;height:34px;vertical-align:middle"></audio>' +
+        '  <button type="button" class="btn small" id="rvmSaveBtn" disabled>Save recording</button>' +
+        '</div>' +
+        '<div class="doclist" id="rvmRecordings"><p class="hint">Loading recordings…</p></div>' +
+        '<div class="actions-row" style="margin-top:10px">' +
+        '  <select id="rvmUseRec" class="search sm" style="min-width:180px"><option value="">— script (text-to-speech) —</option></select>' +
+        '  <button class="btn blue small" id="rvmSendNow"' + (!canRvm ? ' disabled' : '') + '>Send now</button>' +
+        '  <input type="datetime-local" id="rvmWhen" class="search sm">' +
+        '  <button class="btn small" id="rvmSchedule"' + (!canRvm ? ' disabled' : '') + '>Schedule</button>' +
+        '</div>' +
+        '<div class="doclist" id="rvmScheduled"></div>' +
+        (!canRvm ? '<p class="hint">Sending disabled: ' + (truthy(c.dnc) ? 'contact is marked DNC.' : 'RVM consent not granted — toggle SMS/RVM consent above and Save.') + '</p>' : '')) +
     '</div>';
 
   // ---- Tasks (linked to this contact)
@@ -1484,27 +1497,8 @@ function openContactModal(contact, leadDraft) {
     });
   });
 
-  // ---- Drop RVM
-  const rvmBtn = $('#dropRvmBtn', overlay);
-  if (rvmBtn) {
-    rvmBtn.addEventListener('click', async function () {
-      rvmBtn.disabled = true;
-      const orig = rvmBtn.textContent;
-      rvmBtn.textContent = 'Dropping...';
-      try {
-        const rvmEl = $('[data-field="rvm"]', overlay);
-        await api('PATCH', '/contacts/' + encodeURIComponent(c.id), { rvm: rvmEl ? rvmEl.value : (c.rvm || '') });
-        const updated = await api('POST', '/contacts/' + encodeURIComponent(c.id) + '/send-rvm');
-        if (updated && updated.id !== undefined) replaceContact(updated);
-        const pill = $('#rvmPill', overlay);
-        if (pill) { pill.classList.add('sent'); pill.querySelector('input').checked = true; }
-        toast('Ringless voicemail dropped', 'ok');
-        loadActivities(c.id);
-      } catch (e) { toastErr(e); }
-      rvmBtn.textContent = orig;
-      rvmBtn.disabled = false;
-    });
-  }
+  // ---- Ringless voicemail: recorder + send / schedule
+  wireRvm(c, overlay);
 
   // ---- Admin: assign-to-user dropdown (PATCHes owner_id; owner_id is the
   //      tenant-isolation key, so assigning moves visibility to that user).
@@ -2076,6 +2070,209 @@ async function downloadDocument(docId, filename, btn) {
     toastErr(e);
   }
   if (btn) btn.disabled = false;
+}
+
+/* ------------------------- Ringless Voicemail (RVM) ------------------------- */
+
+/** Encode a decoded AudioBuffer to a 16-bit mono WAV Blob (provider-friendly). */
+function encodeWav(audioBuffer) {
+  const len = audioBuffer.length;
+  const sampleRate = audioBuffer.sampleRate;
+  const chs = audioBuffer.numberOfChannels || 1;
+  const data = new Float32Array(len);
+  for (let ch = 0; ch < chs; ch++) {
+    const cd = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < len; i++) data[i] += cd[i] / chs; // downmix to mono
+  }
+  const buffer = new ArrayBuffer(44 + len * 2);
+  const view = new DataView(buffer);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  wr(36, 'data'); view.setUint32(40, len * 2, true);
+  let off = 44;
+  for (let i = 0; i < len; i++) { const s = Math.max(-1, Math.min(1, data[i])); view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2; }
+  return new Blob([view], { type: 'audio/wav' });
+}
+
+/** Convert a recorded Blob (webm/mp4) to a WAV Blob via the Web Audio API. */
+async function blobToWav(blob) {
+  const buf = await blob.arrayBuffer();
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx();
+  try {
+    const audio = await ctx.decodeAudioData(buf);
+    return encodeWav(audio);
+  } finally {
+    try { ctx.close(); } catch (e) {}
+  }
+}
+
+/** Wire the Ringless Voicemail section: record, save, send now / schedule. */
+function wireRvm(c, overlay) {
+  const recBtn = $('#rvmRecBtn', overlay);
+  if (!recBtn) return; // isNew contact
+  const stopBtn = $('#rvmStopBtn', overlay);
+  const saveBtn = $('#rvmSaveBtn', overlay);
+  const statusEl = $('#rvmRecStatus', overlay);
+  const preview = $('#rvmPreview', overlay);
+  const sendNowBtn = $('#rvmSendNow', overlay);
+  const whenEl = $('#rvmWhen', overlay);
+  const schedBtn = $('#rvmSchedule', overlay);
+
+  let mediaRecorder = null, chunks = [], recordedB64 = null, recordedUrl = null, startTs = 0, durMs = 0, timer = null;
+
+  recBtn.addEventListener('click', async function () {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Recording is not supported in this browser.', 'error'); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.onstop = async function () {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+        clearInterval(timer);
+        durMs = Date.now() - startTs;
+        const blob = new Blob(chunks, { type: chunks[0] ? chunks[0].type : 'audio/webm' });
+        statusEl.textContent = 'Processing…';
+        try {
+          const wav = await blobToWav(blob);
+          recordedB64 = await fileToBase64(wav);
+          if (recordedUrl) URL.revokeObjectURL(recordedUrl);
+          recordedUrl = URL.createObjectURL(wav);
+          preview.src = recordedUrl; preview.style.display = 'inline-block';
+          saveBtn.disabled = false;
+          statusEl.textContent = 'Recorded ' + fmtDur(Math.round(durMs / 1000)) + ' — preview, then Save.';
+        } catch (err) {
+          toast('Could not process the recording.', 'error');
+          statusEl.textContent = '';
+        }
+      };
+      mediaRecorder.start();
+      startTs = Date.now();
+      recBtn.disabled = true; stopBtn.disabled = false; saveBtn.disabled = true;
+      statusEl.textContent = 'Recording… 0:00';
+      timer = setInterval(function () { statusEl.textContent = 'Recording… ' + fmtDur(Math.round((Date.now() - startTs) / 1000)); }, 500);
+    } catch (e) {
+      toast('Microphone access was blocked or unavailable.', 'error');
+    }
+  });
+
+  stopBtn.addEventListener('click', function () {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    recBtn.disabled = false; stopBtn.disabled = true;
+  });
+
+  saveBtn.addEventListener('click', async function () {
+    if (!recordedB64) { toast('Record something first.', 'error'); return; }
+    saveBtn.disabled = true;
+    try {
+      await api('POST', '/contacts/' + encodeURIComponent(c.id) + '/rvm/recordings', {
+        mime: 'audio/wav', dataBase64: recordedB64, duration_ms: durMs,
+      });
+      toast('Recording saved', 'ok');
+      recordedB64 = null; preview.style.display = 'none'; statusEl.textContent = '';
+      loadRvmRecordings(c.id, overlay);
+    } catch (e) { toastErr(e); saveBtn.disabled = false; }
+  });
+
+  if (sendNowBtn) sendNowBtn.addEventListener('click', function () { sendRvmForContact(c, overlay, null); });
+  if (schedBtn) schedBtn.addEventListener('click', function () {
+    const v = whenEl && whenEl.value;
+    if (!v) { toast('Pick a date & time to schedule.', 'error'); return; }
+    sendRvmForContact(c, overlay, new Date(v).toISOString());
+  });
+
+  loadRvmRecordings(c.id, overlay);
+  loadRvmScheduled(c.id, overlay);
+}
+
+async function sendRvmForContact(c, overlay, sendAt) {
+  const useRec = $('#rvmUseRec', overlay);
+  const scriptEl = $('[data-field="rvm"]', overlay);
+  const payload = {
+    recordingId: useRec && useRec.value ? useRec.value : null,
+    script: scriptEl ? scriptEl.value : '',
+    sendAt: sendAt || null,
+  };
+  try {
+    const r = await api('POST', '/contacts/' + encodeURIComponent(c.id) + '/rvm/send', payload);
+    if (r && r.scheduled) { toast('Voicemail scheduled', 'ok'); loadRvmScheduled(c.id, overlay); }
+    else { toast(r && r.ok ? 'Voicemail sent' : ('Voicemail: ' + ((r && r.result && r.result.status) || 'not sent')), r && r.ok ? 'ok' : 'error'); }
+    if (scriptEl) api('PATCH', '/contacts/' + encodeURIComponent(c.id), { rvm: scriptEl.value }).catch(function () {});
+    loadActivities(c.id);
+  } catch (e) { toastErr(e); }
+}
+
+async function loadRvmRecordings(contactId, overlay) {
+  const box = $('#rvmRecordings', overlay);
+  const sel = $('#rvmUseRec', overlay);
+  if (!box) return;
+  try {
+    const recs = await api('GET', '/contacts/' + encodeURIComponent(contactId) + '/rvm/recordings') || [];
+    if (sel) {
+      sel.innerHTML = '<option value="">— script (text-to-speech) —</option>' +
+        recs.map(function (r, i) { return '<option value="' + escAttr(r.id) + '">' + esc(r.label || ('Recording ' + (i + 1))) + '</option>'; }).join('');
+      if (recs[0]) sel.value = recs[0].id;
+    }
+    if (!recs.length) { box.innerHTML = '<p class="hint">No recordings yet.</p>'; return; }
+    box.innerHTML = recs.map(function (r) {
+      return '<div class="docitem">' +
+        '<span class="docname">🎙 ' + esc(r.label || 'Recording') + '</span>' +
+        '<span class="docmeta">' + (r.duration_ms ? fmtDur(Math.round(r.duration_ms / 1000)) : '') + ' &middot; ' + esc(fmtTimestamp(r.created_at)) + '</span>' +
+        '<span class="docacts">' +
+        '<button class="btn ghost small" data-play="' + escAttr(r.id) + '">Play</button>' +
+        '<button class="btn ghost small danger" data-delrec="' + escAttr(r.id) + '">Delete</button>' +
+        '</span></div>';
+    }).join('');
+    $all('[data-play]', box).forEach(function (b) { b.addEventListener('click', function () { playRecording(b.getAttribute('data-play')); }); });
+    $all('[data-delrec]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        if (!window.confirm('Delete this recording?')) return;
+        b.disabled = true;
+        try { await api('DELETE', '/rvm/recordings/' + encodeURIComponent(b.getAttribute('data-delrec'))); toast('Recording deleted', 'ok'); loadRvmRecordings(contactId, overlay); }
+        catch (e) { toastErr(e); b.disabled = false; }
+      });
+    });
+  } catch (e) { box.innerHTML = '<p class="hint">Could not load recordings: ' + esc(e.message) + '</p>'; }
+}
+
+async function playRecording(recId) {
+  try {
+    const res = await fetch('/api/rvm/recordings/' + encodeURIComponent(recId) + '/audio', {
+      headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+    });
+    if (!res.ok) throw new Error('Playback failed (' + res.status + ')');
+    const url = URL.createObjectURL(await res.blob());
+    const a = new Audio(url);
+    a.play();
+    a.onended = function () { URL.revokeObjectURL(url); };
+  } catch (e) { toastErr(e); }
+}
+
+async function loadRvmScheduled(contactId, overlay) {
+  const box = $('#rvmScheduled', overlay);
+  if (!box) return;
+  try {
+    const items = await api('GET', '/contacts/' + encodeURIComponent(contactId) + '/rvm/scheduled') || [];
+    if (!items.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<p class="hint" style="margin:8px 0 4px">Scheduled voicemails:</p>' + items.map(function (s) {
+      return '<div class="docitem">' +
+        '<span class="docname">⏰ ' + esc(fmtTimestamp(s.send_at)) + '</span>' +
+        '<span class="docmeta">' + (s.recording_id ? 'recording' : 'script') + '</span>' +
+        '<span class="docacts"><button class="btn ghost small danger" data-cancelsch="' + escAttr(s.id) + '">Cancel</button></span>' +
+        '</div>';
+    }).join('');
+    $all('[data-cancelsch]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        b.disabled = true;
+        try { await api('DELETE', '/rvm/scheduled/' + encodeURIComponent(b.getAttribute('data-cancelsch'))); toast('Schedule canceled', 'ok'); loadRvmScheduled(contactId, overlay); }
+        catch (e) { toastErr(e); b.disabled = false; }
+      });
+    });
+  } catch (e) { box.innerHTML = ''; }
 }
 
 /** Load + render the tasks linked to a single contact, inside its modal. */

@@ -451,3 +451,7 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 .docitem .docname{ font-weight:600; flex:1; min-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .docitem .docmeta{ font-size:12px; color:var(--muted); }
 .docitem .docacts{ display:flex; gap:6px; margin-left:auto; }
+
+/* RVM recorder row */
+.rvmrec{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:4px 0 6px; }
+#rvmRecBtn{ color:#ff2d78; }
