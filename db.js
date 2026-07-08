@@ -295,6 +295,8 @@ CREATE TABLE IF NOT EXISTS google_accounts (
 const GOOGLE_TASK_COLUMNS = [
   ['google_task_id', 'TEXT'],
   ['google_event_id', 'TEXT'],
+  ['due_time', 'TEXT'],       // optional HH:MM start time (24h) for the task
+  ['duration_min', 'INTEGER'], // optional length in minutes (used with due_time)
 ];
 
 {
