@@ -671,8 +671,8 @@ function pipelineCardHtml(c) {
   if (truthy(c.dnc)) meta += '<span class="tag warn">DNC</span>';
   if (c.closing) meta += '<span class="tag">Close ' + esc(fmtDate(c.closing)) + '</span>';
   return '<div class="pcard" draggable="true" data-id="' + escAttr(c.id) + '">' +
-    '<div class="nm">' + gradeBadge(c) + esc(c.name || '(no name)') + '</div>' +
-    '<div class="pr">' + esc(c.property || '') + '</div>' +
+    '<div class="nm">' + gradeBadge(c) + esc(c.property || '(no address)') + '</div>' +
+    '<div class="pr">' + esc(c.name || '') + '</div>' +
     (meta ? '<div class="meta">' + meta + '</div>' : '') +
     '</div>';
 }
@@ -2741,6 +2741,31 @@ function gradeBadge(c) {
   return '<span class="grade-badge grade-' + g + '" title="Lead grade ' + g + '">' + g + '</span>';
 }
 
+/** Load an external script once (cached by src). */
+function loadScriptOnce(src) {
+  return new Promise(function (resolve, reject) {
+    if (document.querySelector('script[data-src="' + src + '"]')) return resolve();
+    const s = document.createElement('script');
+    s.src = src; s.setAttribute('data-src', src);
+    s.onload = function () { resolve(); };
+    s.onerror = function () { reject(new Error('Could not load helper library (check your connection).')); };
+    document.head.appendChild(s);
+  });
+}
+
+/** Read a CSV or Excel File and return CSV text (Excel parsed via SheetJS). */
+async function fileToCsvText(file) {
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_csv(ws);
+  }
+  return await file.text();
+}
+
 function renderLeadEngine() {
   const root = $('#view-leadengine');
   const admin = isAdmin();
@@ -2759,6 +2784,14 @@ function renderLeadEngine() {
     '<div class="actions-row">' +
     '<input class="search" id="leUrl" type="url" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" style="flex:1;min-width:260px">' +
     '<button class="btn" id="leRun">RUN Sync</button>' +
+    '</div>' +
+    '<h3 style="margin-top:20px">Upload a file</h3>' +
+    '<p class="hint" style="margin:6px 0 10px">Import directly from a <b>.csv</b> or <b>.xlsx / .xls</b> file on your device — including Zillow exports. Columns are auto-mapped and graded A–F.</p>' +
+    '<div class="actions-row">' +
+    '<input type="file" id="leFile" accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none">' +
+    '<button class="btn" id="leFilePick">Choose CSV / Excel…</button>' +
+    '<span class="hint" id="leFileName" style="align-self:center"></span>' +
+    '<button class="btn blue" id="leFileImport" disabled>Import file</button>' +
     '</div>';
 
   if (admin) {
@@ -2854,6 +2887,30 @@ function renderLeadEngine() {
     const text = $('#leCsv').value;
     if (!text.trim()) { toast('Paste CSV text first.', 'error'); return; }
     runSync({ csvText: text }, this);
+  });
+
+  // ---- Upload a CSV / Excel file
+  var lePicked = null;
+  const leFile = $('#leFile'), leFilePick = $('#leFilePick'), leFileImport = $('#leFileImport'), leFileName = $('#leFileName');
+  if (leFilePick) leFilePick.addEventListener('click', function () { leFile.click(); });
+  if (leFile) leFile.addEventListener('change', function () {
+    lePicked = (leFile.files && leFile.files[0]) || null;
+    if (leFileName) leFileName.textContent = lePicked ? lePicked.name : '';
+    if (leFileImport) leFileImport.disabled = !lePicked;
+  });
+  if (leFileImport) leFileImport.addEventListener('click', async function () {
+    if (!lePicked) { toast('Choose a file first.', 'error'); return; }
+    const btn = this; const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Reading…';
+    try {
+      const csvText = await fileToCsvText(lePicked);
+      btn.textContent = orig;
+      if (!csvText || !csvText.trim()) { setResult('That file appears to be empty.', true); btn.disabled = false; return; }
+      runSync({ csvText: csvText }, btn); // runSync re-enables the button
+    } catch (e) {
+      setResult(e && e.message ? e.message : String(e), true);
+      btn.textContent = orig; btn.disabled = false;
+    }
   });
 
   if (admin) {
