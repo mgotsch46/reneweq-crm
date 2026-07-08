@@ -24,6 +24,7 @@ const taskRoutes = require('./routes/tasks');
 const userRoutes = require('./routes/users');
 const leadEngineRoutes = require('./routes/leadengine');
 const googleRoutes = require('./routes/google');
+const microsoftRoutes = require('./routes/microsoft');
 const scheduler = require('./scheduler'); // Lead Engine daily auto-import
 
 const app = express();
@@ -61,6 +62,9 @@ app.use('/api/leadengine', requireAuth, leadEngineRoutes);
 // callback arrives as a bare browser redirect from Google. Every other
 // /api/google route applies requireAuth itself (see routes/google.js).
 app.use('/api/google', googleRoutes.router);
+
+// Microsoft To Do / Outlook Calendar integration — same pattern as Google.
+app.use('/api/microsoft', microsoftRoutes.router);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);

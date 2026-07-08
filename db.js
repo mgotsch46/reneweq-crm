@@ -292,11 +292,24 @@ CREATE TABLE IF NOT EXISTS google_accounts (
   connected_at  TEXT
 )`);
 
+// Per-user Microsoft (Graph) OAuth tokens — same shape as google_accounts.
+db.exec(`
+CREATE TABLE IF NOT EXISTS microsoft_accounts (
+  user_id       TEXT PRIMARY KEY REFERENCES users(id),
+  email         TEXT,
+  access_token  TEXT,
+  refresh_token TEXT,
+  token_expiry  TEXT,
+  connected_at  TEXT
+)`);
+
 const GOOGLE_TASK_COLUMNS = [
   ['google_task_id', 'TEXT'],
   ['google_event_id', 'TEXT'],
   ['due_time', 'TEXT'],       // optional HH:MM start time (24h) for the task
   ['duration_min', 'INTEGER'], // optional length in minutes (used with due_time)
+  ['ms_todo_id', 'TEXT'],     // synced Microsoft To Do task id
+  ['ms_event_id', 'TEXT'],    // synced Outlook Calendar event id
 ];
 
 {
