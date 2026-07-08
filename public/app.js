@@ -565,6 +565,11 @@ function renderPipeline() {
     '  <button class="btn" id="npBtn">+ New Contact</button>' +
     '  <button class="btn blue" id="alBtn">+ Add Lead</button>' +
     '  <input class="search big" id="pipeSearch" type="search" placeholder="Search name, phone, email, or address…" value="' + escAttr(state.pipelineSearch || '') + '">' +
+    '  <select class="search sm" id="pipeSort" title="Sort cards within each stage">' +
+    [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['address', 'Address (A–Z)'],
+     ['city', 'City (A–Z)'], ['state', 'State (A–Z)'], ['name', 'Contact name (A–Z)'], ['grade', 'Grade (A→F)']]
+      .map(function (o) { return '<option value="' + o[0] + '"' + ((state.pipelineSort || 'newest') === o[0] ? ' selected' : '') + '>Sort: ' + o[1] + '</option>'; }).join('') +
+    '  </select>' +
     '  <span class="hint">Drag cards between stages to update.</span>' +
     '</div>' +
     '<div class="board" id="board"></div>';
@@ -579,8 +584,35 @@ function renderPipeline() {
       renderPipelineBoard(); // re-render only the board so the input keeps focus
     });
   }
+  const sortSel = $('#pipeSort');
+  if (sortSel) sortSel.addEventListener('change', function () {
+    state.pipelineSort = this.value;
+    renderPipelineBoard();
+  });
 
   renderPipelineBoard();
+}
+
+/** Comparator for the pipeline sort dropdown. */
+function pipelineSortCards(cards) {
+  const mode = state.pipelineSort || 'newest';
+  const arr = cards.slice();
+  const txt = function (v) { return String(v || '').trim().toLowerCase(); };
+  const dt = function (c) { return c.imported_at || c.created_at || ''; };
+  arr.sort(function (a, b) {
+    if (mode === 'newest') return String(dt(b)).localeCompare(String(dt(a)));
+    if (mode === 'oldest') return String(dt(a)).localeCompare(String(dt(b)));
+    if (mode === 'grade') return txt(a.grade || 'z').localeCompare(txt(b.grade || 'z'));
+    let key = 'property';
+    if (mode === 'city') key = 'city';
+    else if (mode === 'state') key = 'state';
+    else if (mode === 'name') key = 'name';
+    const av = txt(a[key]), bv = txt(b[key]);
+    if (!av && bv) return 1;      // blanks last
+    if (av && !bv) return -1;
+    return av.localeCompare(bv);
+  });
+  return arr;
 }
 
 /** True if a contact matches the live pipeline search (name/phone/email/address). */
@@ -599,9 +631,9 @@ function renderPipelineBoard() {
   const q = state.pipelineSearch || '';
   let html = '';
   STAGES.forEach(function (stage) {
-    const cards = state.contacts.filter(function (c) {
+    const cards = pipelineSortCards(state.contacts.filter(function (c) {
       return (c.stage || STAGES[0]) === stage && pipelineMatches(c, q);
-    });
+    }));
     html += '<div class="col" data-stage="' + escAttr(stage) + '">' +
       '<h3><span>' + esc(stage) + '</span><span class="count">' + cards.length + '</span></h3>' +
       '<div class="cards" data-stage="' + escAttr(stage) + '">';
@@ -666,13 +698,16 @@ function pipelineCardHtml(c) {
   if (c.lead_status) meta += leadStatusBadge(c);
   if ((c.source === 'Lead' || c.source === 'Lead Engine') && (c.stage || STAGES[0]) === 'Prospect') meta += '<span class="tag lead">NEW LEAD</span>';
   if (truthy(c.isFsbo)) meta += '<span class="tag warn">FSBO</span>';
-  if (c.zillow) meta += '<span class="tag blue">Zillow</span>';
   if (isAdmin() && c.ownerName) meta += '<span class="tag grey">' + esc(c.ownerName) + '</span>';
   if (truthy(c.dnc)) meta += '<span class="tag warn">DNC</span>';
   if (c.closing) meta += '<span class="tag">Close ' + esc(fmtDate(c.closing)) + '</span>';
+  // Date the lead came in (imported/added).
+  const added = c.imported_at || c.created_at;
+  const dateLine = added ? '<div class="pdate">📅 Added ' + esc(fmtDate(added)) + '</div>' : '';
   return '<div class="pcard" draggable="true" data-id="' + escAttr(c.id) + '">' +
     '<div class="nm">' + gradeBadge(c) + esc(c.property || '(no address)') + '</div>' +
     '<div class="pr">' + esc(c.name || '') + '</div>' +
+    dateLine +
     (meta ? '<div class="meta">' + meta + '</div>' : '') +
     '</div>';
 }

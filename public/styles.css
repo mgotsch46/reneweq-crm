@@ -464,6 +464,9 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 /* Unread inbound activity row highlight */
 .logitem.unread{ box-shadow:inset 3px 0 0 #ff2d78; }
 
+/* Pipeline card "Added" date line */
+.pcard .pdate{ font-size:11px; opacity:.65; margin-top:2px; }
+
 /* ------------------------------ Mobile / PWA ------------------------------ */
 /* Respect iOS safe areas (notch) when installed. */
 body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-bottom); }
