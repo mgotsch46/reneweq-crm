@@ -279,7 +279,7 @@ const insertLead = db.prepare(`
     agentName, agentPhone, agentEmail, agentCompany, isFsbo,
     keywords, sourceUrl, zpid, listingDescription, priceChanges,
     importDate, dateFound, grade,
-    lead_status, opened, called, imported_at,
+    lead_status, opened, called, imported_at, lead_source,
     dnc, consent_sms, consent_rvm, texts, textStatus, rvm, rvmStatus,
     created_at, updated_at
   ) VALUES (
@@ -289,7 +289,7 @@ const insertLead = db.prepare(`
     @agentName, @agentPhone, @agentEmail, @agentCompany, @isFsbo,
     @keywords, @sourceUrl, @zpid, @listingDescription, @priceChanges,
     @importDate, @dateFound, @grade,
-    'NEW', 0, 0, @imported_at,
+    'NEW', 0, 0, @imported_at, @lead_source,
     0, 0, 0, @texts, @textStatus, @rvm, 0,
     @created_at, @updated_at
   )
@@ -342,7 +342,7 @@ function httpError(status, message) {
  *   - After the row loop the queue is aged: still-NEW leads that were NOT
  *     touched this run and were never opened/called become 'IN QUEUE'.
  */
-async function syncFromCsv({ csvText, csvUrl, ownerId }) {
+async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
   if (!ownerId) throw httpError(400, 'No import owner available');
 
   // CSV text comes from the user's sheet URL or pasted text — never scraped.
@@ -451,7 +451,7 @@ async function syncFromCsv({ csvText, csvUrl, ownerId }) {
             id,
             owner_id: ownerId,
             name: lead.name,
-            stage: 'Prospect',
+            stage: 'New',
             notes: null,
             source: 'Lead Engine',
             property: lead.property, zillow: lead.zillow,
@@ -468,6 +468,7 @@ async function syncFromCsv({ csvText, csvUrl, ownerId }) {
             importDate: lead.importDate, dateFound: lead.dateFound,
             grade,
             imported_at: ts,
+            lead_source: sourceTag || null,
             texts: JSON.stringify(DEFAULT_TEXTS),
             textStatus: JSON.stringify([false, false, false, false]),
             rvm: DEFAULT_RVM,
@@ -654,7 +655,8 @@ router.post('/upload', async (req, res) => {
     return res.status(400).json({ error: 'Paste CSV text or upload a .csv file first' });
   }
   try {
-    const out = await syncFromCsv({ csvText: String(csvText), ownerId: req.user.id });
+    const tag = (req.body && req.body.sourceTag) ? String(req.body.sourceTag) : 'Manual Upload';
+    const out = await syncFromCsv({ csvText: String(csvText), ownerId: req.user.id, sourceTag: tag });
     res.json(out);
   } catch (e) {
     res.status(e.statusCode || 500).json({

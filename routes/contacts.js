@@ -29,13 +29,16 @@ const CONTACT_FIELDS = [
   // Lead Engine fields
   'zip', 'price', 'zpid', 'listingDate', 'grade', 'importDate', 'dateFound',
   'propertyType', 'lead_status', 'status_locked',
+  // Wholesale workflow fields
+  'wholesale_fee', 'lead_source', 'offerAcceptedDate', 'archived',
+  'dead_reason', 'dead_notes',
 ];
 
 /** Lead Engine triage statuses. */
 const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING'];
 
-const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price'];
-const BOOL_FIELDS = ['dnc', 'consent_sms', 'consent_rvm', 'rvmStatus', 'isFsbo', 'status_locked'];
+const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price', 'wholesale_fee'];
+const BOOL_FIELDS = ['dnc', 'consent_sms', 'consent_rvm', 'rvmStatus', 'isFsbo', 'status_locked', 'archived'];
 
 /** Coerce loose client input to a number or null (node:sqlite rejects '' / NaN). */
 function toNum(v) {
@@ -170,12 +173,33 @@ router.get('/', (req, res) => {
   if (qp.stage) { where.push('c.stage = ?'); params.push(String(qp.stage)); }
   if (qp.grade) { where.push('c.grade = ? COLLATE NOCASE'); params.push(String(qp.grade)); }
   if (qp.lead_status) { where.push('c.lead_status = ? COLLATE NOCASE'); params.push(String(qp.lead_status)); }
+  if (qp.source) { where.push('c.lead_source = ? COLLATE NOCASE'); params.push(String(qp.source)); }
+
+  // ARCHIVE: dead/archived deals are hidden from active views by default.
+  //   (default)          → only active (archived = 0)
+  //   ?archived=true     → only the archive (archived = 1)
+  //   ?archived=all      → everything
+  if (qp.archived === 'true' || qp.archived === '1') {
+    where.push('COALESCE(c.archived,0) = 1');
+  } else if (qp.archived !== 'all') {
+    where.push('COALESCE(c.archived,0) = 0');
+  }
+
+  // SORTING: newest (default) | stage (pipeline order) | source (tag) | address
+  const stageOrderCase = 'CASE c.stage ' +
+    STAGES.map((s, i) => `WHEN '${s.replace(/'/g, "''")}' THEN ${i}`).join(' ') +
+    ' ELSE 999 END';
+  let orderBy = 'c.created_at DESC';
+  if (qp.sort === 'stage') orderBy = stageOrderCase + ' ASC, c.created_at DESC';
+  else if (qp.sort === 'source') orderBy = "COALESCE(c.lead_source,'') COLLATE NOCASE ASC, c.created_at DESC";
+  else if (qp.sort === 'address') orderBy = "COALESCE(c.property,'') COLLATE NOCASE ASC";
+  else if (qp.sort === 'oldest') orderBy = 'c.created_at ASC';
 
   const rows = db.prepare(`
     SELECT c.*, u.name AS ownerName
     FROM contacts c JOIN users u ON u.id = c.owner_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY c.created_at DESC
+    ORDER BY ${orderBy}
   `).all(...params);
   res.json(rows.map(parseContact));
 });
@@ -194,7 +218,7 @@ function buildContact(body, ownerId) {
     agentName: body.agentName || null,
     agentPhone: body.agentPhone || null,
     agentEmail: body.agentEmail || null,
-    stage: body.stage || 'Prospect',
+    stage: body.stage || 'New',
     notes: body.notes || null,
     executedContract: body.executedContract || null,
     closing: body.closing || null,
@@ -229,6 +253,13 @@ function buildContact(body, ownerId) {
     city: body.city || null,
     state: body.state || null,
     listingDescription: body.listingDescription || null,
+    // Wholesale workflow fields
+    wholesale_fee: toNum(body.wholesale_fee),
+    lead_source: body.lead_source || null,
+    offerAcceptedDate: body.offerAcceptedDate || null,
+    archived: toBit(body.archived),
+    dead_reason: body.dead_reason || null,
+    dead_notes: body.dead_notes || null,
     created_at: ts,
     updated_at: ts,
   };
@@ -244,6 +275,7 @@ function insertContactRow(contact) {
       beds, baths, sqft, agentCompany, isFsbo, sellerName, fsboPhone, fsboEmail,
       daysOnMarket, priceChanges, propertyTax, photoUrl, sourceUrl, keywords,
       city, state, listingDescription,
+      wholesale_fee, lead_source, offerAcceptedDate, archived, dead_reason, dead_notes,
       created_at, updated_at
     ) VALUES (
       @id, @owner_id, @name, @email, @phone, @property, @zillow,
@@ -253,6 +285,7 @@ function insertContactRow(contact) {
       @beds, @baths, @sqft, @agentCompany, @isFsbo, @sellerName, @fsboPhone, @fsboEmail,
       @daysOnMarket, @priceChanges, @propertyTax, @photoUrl, @sourceUrl, @keywords,
       @city, @state, @listingDescription,
+      @wholesale_fee, @lead_source, @offerAcceptedDate, @archived, @dead_reason, @dead_notes,
       @created_at, @updated_at
     )
   `).run(contact);
@@ -464,6 +497,23 @@ router.patch('/:id', (req, res) => {
     if (v === undefined) v = null;
     sets.push(`${f} = @${f}`);
     params[f] = v;
+  }
+
+  // ---- Wholesale stage side-effects ------------------------------------
+  if (body.stage && body.stage !== contact.stage) {
+    // Moving INTO "Offer Accepted" auto-stamps the accepted date (Important
+    // Dates) if the client didn't supply one and it isn't already set.
+    if (body.stage === 'Offer Accepted' && !('offerAcceptedDate' in body) && !contact.offerAcceptedDate) {
+      sets.push('offerAcceptedDate = @offerAcceptedDate');
+      params.offerAcceptedDate = now().slice(0, 10);
+    }
+    // Moving INTO "Dead Deal" archives the contact (filed away, hidden from
+    // active views). Moving OUT of Dead Deal reactivates it.
+    if (body.stage === 'Dead Deal' && !('archived' in body)) {
+      sets.push('archived = @archived'); params.archived = 1;
+    } else if (contact.stage === 'Dead Deal' && body.stage !== 'Dead Deal' && !('archived' in body)) {
+      sets.push('archived = @archived'); params.archived = 0;
+    }
   }
 
   // ASSIGN-TO-USER: only an ADMIN may change owner_id (the tenant-isolation
@@ -768,7 +818,7 @@ leadsRouter.post('/', (req, res) => {
     body.name || body.sellerName || body.agentName || body.property || 'New Lead';
 
   const contact = buildContact(
-    { ...body, name, stage: 'Prospect', source: body.source || 'Lead' },
+    { ...body, name, stage: 'New', source: body.source || 'Lead' },
     owner.ownerId
   );
   insertContactRow(contact);
