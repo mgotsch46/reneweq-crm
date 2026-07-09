@@ -1454,6 +1454,33 @@ function keywordsVal(v) {
   return v || '';
 }
 
+/**
+ * Create a dated task (which syncs to the user's connected Google/Microsoft
+ * calendar) for each Important Date that was newly entered or changed. The task
+ * title includes the property address so it's easy to spot on the calendar.
+ */
+async function pushImportantDatesToCalendar(before, after, contactId, property) {
+  if (!contactId || !after) return;
+  const fields = [
+    ['offerAcceptedDate', 'Offer Accepted'],
+    ['executedContract', 'Executed Contract'],
+    ['closing', 'Closing'],
+    ['dueDiligence', 'Due Diligence'],
+    ['inspectionExpires', 'Inspection Expires'],
+  ];
+  const addr = property ? ' — ' + property : '';
+  for (var i = 0; i < fields.length; i++) {
+    const key = fields[i][0], label = fields[i][1];
+    const v = after[key];
+    if (!v) continue;
+    const prev = before ? before[key] : null;
+    if (String(v).slice(0, 10) === String(prev || '').slice(0, 10)) continue; // unchanged
+    try {
+      await api('POST', '/tasks', { title: label + addr, due_date: String(v).slice(0, 10), contact_id: contactId });
+    } catch (e) { /* calendar push is best-effort */ }
+  }
+}
+
 function openContactModal(contact, leadDraft) {
   const isNew = !contact;
   const isLead = isNew && !!leadDraft;
@@ -1824,6 +1851,8 @@ function openContactModal(contact, leadDraft) {
         toast('Contact saved', 'ok');
       }
       if (saved) replaceContact(saved);
+      // Auto-push newly-entered Important Dates to the calendar (with address).
+      pushImportantDatesToCalendar(isNew ? {} : c, payload, (saved && saved.id) || c.id, payload.property || (saved && saved.property) || c.property);
       closeModal();
       rerenderCurrentContactView();
     } catch (e) {
@@ -2286,13 +2315,17 @@ async function loadActivities(contactId) {
         ? ' <button class="btn ghost small" data-toggleread="' + escAttr(a.id) + '" data-read="' + (a.read_at ? '1' : '0') + '">' +
           (a.read_at ? 'Mark new' : 'Mark viewed') + '</button>'
         : '';
+      // Admin-only: delete an activity-log entry.
+      const delBtn = isAdmin()
+        ? ' <button class="btn ghost small danger" data-actdel="' + escAttr(a.id) + '" title="Delete this entry (admin)">Delete</button>'
+        : '';
       return '<div class="logitem' + (isUnread ? ' unread' : '') + '">' +
         '<div class="lh">' +
         '<span><span class="typechip ' + chipClass + '">' + esc(type.toUpperCase()) + '</span>' + newBadge +
         (extra.length ? ' <span>' + extra.join(' &middot; ') + '</span>' : '') + '</span>' +
         '<span>' + esc(fmtTimestamp(a.created_at)) + (a.created_by ? ' &middot; ' + esc(a.created_by) : '') + '</span>' +
         '</div>' +
-        '<div>' + esc(a.body || '') + playBtn + toggleBtn + '</div>' +
+        '<div>' + esc(a.body || '') + playBtn + toggleBtn + delBtn + '</div>' +
         '</div>';
     }).join('');
     box.scrollTop = box.scrollHeight;
@@ -2317,6 +2350,18 @@ async function loadActivities(contactId) {
           await api('POST', '/activities/' + encodeURIComponent(b.getAttribute('data-toggleread')) + '/read', { read: !wasRead });
           loadActivities(contactId);
           refreshVoicemailBadge();
+        } catch (e) { toastErr(e); }
+      });
+    });
+
+    // Wire admin-only activity delete.
+    $all('[data-actdel]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        if (!window.confirm('Delete this activity entry? This cannot be undone.')) return;
+        try {
+          await api('DELETE', '/contacts/' + encodeURIComponent(contactId) + '/activities/' + encodeURIComponent(b.getAttribute('data-actdel')));
+          toast('Activity deleted', 'ok');
+          loadActivities(contactId);
         } catch (e) { toastErr(e); }
       });
     });
