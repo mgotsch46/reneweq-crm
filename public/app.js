@@ -3044,7 +3044,7 @@ function renderSettings() {
       ? '<h3 style="margin-top:18px">Voicemail Greeting</h3>' +
         '<p class="hint">What callers hear when a call to your number goes to voicemail. Type a greeting (spoken by the system) and/or record your own voice — a recording, if present, is used instead of the text.</p>' +
         '<div class="field"><label>Greeting text</label>' +
-        '<textarea id="vmGreetText" rows="2" placeholder="You\'ve reached RenewEQ. Please leave a message after the tone, then hang up."></textarea></div>' +
+        '<textarea id="vmGreetText" rows="2" placeholder="You\'ve reached Deal Flow Pro. Please leave a message after the tone, then hang up."></textarea></div>' +
         '<div class="actions-row"><button class="btn small" id="vmGreetSave">Save text</button></div>' +
         '<div class="rvmrec" style="margin-top:10px">' +
         '  <button type="button" class="btn small" id="vmGreetRec">● Record greeting</button>' +

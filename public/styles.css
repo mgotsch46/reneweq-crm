@@ -505,3 +505,13 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
   .btn.small{ padding:8px 10px; }
   .callbtn{ width:34px; height:34px; }
 }
+
+/* ---------- Deal Flow Pro brand ---------- */
+.brand-lockup{ display:flex; align-items:center; justify-content:center; gap:12px; margin:0 0 2px; }
+.brand-lockup h1{ margin:0; font-size:24px; font-weight:800; color:var(--text); }
+.brand-lockup h1 span{ color:#ff343a; }
+.brand-logo{ width:52px; height:52px; border-radius:13px; box-shadow:0 4px 14px rgba(0,0,0,.45); }
+.brand-tag{ margin:0 0 16px; text-align:center; font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); font-weight:600; }
+.logo{ display:flex; align-items:center; gap:9px; }
+.logo .logo-mark{ width:30px; height:30px; border-radius:8px; }
+.logo span{ color:#ff343a; }
