@@ -6,10 +6,15 @@
 
 /* ------------------------------ Constants ------------------------------ */
 
-const STAGES = [
-  'Prospect', 'Offer Delivered', 'Offer Accepted', 'Property Analyzer Run',
-  'BOG Walk Through', 'EMD Sent', 'Dispo', 'Assigned', 'Closed'
+// Pipeline stages (kept in sync with the server via /api/config on boot).
+let STAGES = [
+  'New', 'Contacted', 'Qualified', 'Offer Sent', 'Negotiation', 'Offer Accepted',
+  'Property Analyzer', 'BOG Walk Through', 'EMD Sent', 'Dispo', 'Assigned', 'Closed', 'Dead Deal'
 ];
+// The final stage is the "dead deal" bucket (archives the contact).
+const DEAD_STAGE = 'Dead Deal';
+let LEAD_SOURCES = ['Manual Upload', 'Zillow', 'Referral', 'Email Campaign', 'Custom'];
+let DEAD_REASONS = ['Did not accept offer', 'Sold', 'Other'];
 
 const TOKEN_KEY = 'crm_token';
 
@@ -30,7 +35,7 @@ const state = {
   tab: 'pipeline',
   contactSearch: '',
   contactList: null, // server-filtered list for the Contacts view
-  filters: { q: '', city: '', state: '', agent: '', fsbo: '', grade: '', leadStatus: '' },
+  filters: { q: '', city: '', state: '', agent: '', fsbo: '', grade: '', leadStatus: '', source: '', sort: '', archived: false },
   sort: { key: '', dir: 1 },   // Contacts table client-side sort
   selected: {},                // Contacts table bulk selection (id -> true)
   registerMode: false
@@ -282,6 +287,9 @@ async function bootApp() {
   }
   try {
     state.config = await api('GET', '/config') || { messagingMode: 'stub' };
+    if (Array.isArray(state.config.stages) && state.config.stages.length) STAGES = state.config.stages;
+    if (Array.isArray(state.config.leadSources) && state.config.leadSources.length) LEAD_SOURCES = state.config.leadSources;
+    if (Array.isArray(state.config.deadReasons) && state.config.deadReasons.length) DEAD_REASONS = state.config.deadReasons;
   } catch (e) {
     state.config = { messagingMode: 'stub' };
   }
@@ -326,15 +334,24 @@ async function bootApp() {
 function isAdmin() { return state.user && state.user.role === 'admin'; }
 
 async function refreshContacts() {
+  // Load EVERYTHING (including archived Dead Deals) so the pipeline can show the
+  // Dead Deal column; the Contacts table hides archived rows client-side.
+  const params = ['archived=all'];
   // Admin lead view filter: 'mine' | '<userId>' | '' (all). Non-admins are
   // always scoped to themselves by the server regardless of this value.
-  let qs = '';
   if (isAdmin() && state.leadOwnerFilter) {
-    qs = state.leadOwnerFilter === 'mine'
-      ? '?mine=true'
-      : '?owner=' + encodeURIComponent(state.leadOwnerFilter);
+    params.push(state.leadOwnerFilter === 'mine' ? 'mine=true' : 'owner=' + encodeURIComponent(state.leadOwnerFilter));
   }
-  state.contacts = await api('GET', '/contacts' + qs) || [];
+  state.contacts = await api('GET', '/contacts?' + params.join('&')) || [];
+}
+
+/** Active (non-archived) contacts — used by the Contacts table + counts. */
+function activeContacts() {
+  return (state.contacts || []).filter(function (c) { return !truthy(c.archived); });
+}
+/** Archived (dead) contacts — used by the Archive view. */
+function archivedContacts() {
+  return (state.contacts || []).filter(function (c) { return truthy(c.archived); });
 }
 
 /** Build the admin "view by owner" dropdown (All / Mine / each user). */
@@ -832,7 +849,8 @@ function refreshPipelineCounts() {
 function pipelineCardHtml(c) {
   let meta = '';
   if (c.lead_status) meta += leadStatusBadge(c);
-  if ((c.source === 'Lead' || c.source === 'Lead Engine') && (c.stage || STAGES[0]) === 'Prospect') meta += '<span class="tag lead">NEW LEAD</span>';
+  if ((c.source === 'Lead' || c.source === 'Lead Engine') && (c.stage || STAGES[0]) === STAGES[0]) meta += '<span class="tag lead">NEW LEAD</span>';
+  if (c.lead_source) meta += '<span class="tag blue">' + esc(c.lead_source) + '</span>';
   if (truthy(c.isFsbo)) meta += '<span class="tag warn">FSBO</span>';
   if (isAdmin() && c.ownerName) meta += '<span class="tag grey">' + esc(c.ownerName) + '</span>';
   if (truthy(c.dnc)) meta += '<span class="tag warn">DNC</span>';
@@ -887,7 +905,16 @@ function renderContacts() {
       return '<option value="' + escAttr(st) + '"' + (f.leadStatus === st ? ' selected' : '') + '>' + esc(st) + '</option>';
     }).join('') +
     '  </select>' +
+    // Lead-source tag filter (free text + suggestions)
+    '  <input class="search sm" id="fSource" type="text" list="fSourceList" placeholder="Lead source tag" value="' + escAttr(f.source || '') + '">' +
+    '  <datalist id="fSourceList">' + LEAD_SOURCES.map(function (s) { return '<option value="' + escAttr(s) + '">'; }).join('') + '</datalist>' +
+    // Sort (incl. by sales-funnel stage progress)
+    '  <select class="search sm" id="fSort" title="Sort contacts">' +
+    [['', 'Sort: Newest'], ['oldest', 'Sort: Oldest'], ['stage', 'Sort: Funnel stage'], ['source', 'Sort: Lead source'], ['address', 'Sort: Address']]
+      .map(function (o) { return '<option value="' + o[0] + '"' + (f.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+    '  </select>' +
     (isAdmin() ? ownerFilterHtml() : '') +
+    '  <button class="btn ' + (f.archived ? 'blue ' : 'ghost ') + 'small" id="fArchive" title="Show archived dead deals">' + (f.archived ? 'Viewing Archive' : 'Archive') + '</button>' +
     '  <button class="btn ghost small" id="fClear">Clear</button>' +
     '</div>' +
     '<div id="bulkBar"></div>' +
@@ -916,8 +943,20 @@ function renderContacts() {
     state.filters.leadStatus = $('#fStatus').value;
     applyContactFilters();
   });
+  $('#fSource').addEventListener('input', function () {
+    state.filters.source = $('#fSource').value.trim();
+    debounced();
+  });
+  $('#fSort').addEventListener('change', function () {
+    state.filters.sort = $('#fSort').value;
+    applyContactFilters();
+  });
+  $('#fArchive').addEventListener('click', function () {
+    state.filters.archived = !state.filters.archived;
+    renderContacts();
+  });
   $('#fClear').addEventListener('click', function () {
-    state.filters = { q: '', city: '', state: '', agent: '', fsbo: '', grade: '', leadStatus: '' };
+    state.filters = { q: '', city: '', state: '', agent: '', fsbo: '', grade: '', leadStatus: '', source: '', sort: '', archived: false };
     renderContacts();
   });
   wireOwnerFilter(function () { renderContacts(); });
@@ -932,7 +971,7 @@ function renderContacts() {
 
 function filtersActive() {
   const f = state.filters;
-  return Boolean(f.q || f.city || f.state || f.agent || f.fsbo || f.grade || f.leadStatus);
+  return Boolean(f.q || f.city || f.state || f.agent || f.fsbo || f.grade || f.leadStatus || f.source || f.sort || f.archived);
 }
 
 /* Fetch the contact list from the server using the active filters (the
@@ -947,10 +986,16 @@ async function applyContactFilters() {
   if (f.fsbo) parts.push('fsbo=' + encodeURIComponent(f.fsbo));
   if (f.grade) parts.push('grade=' + encodeURIComponent(f.grade));
   if (f.leadStatus) parts.push('lead_status=' + encodeURIComponent(f.leadStatus));
+  if (f.source) parts.push('source=' + encodeURIComponent(f.source));
+  if (f.sort) parts.push('sort=' + encodeURIComponent(f.sort));
+  // Archive view shows only dead/archived deals; otherwise fetch EVERYTHING
+  // (so the pipeline's Dead Deal column stays populated) and hide archived
+  // rows in the table client-side.
+  parts.push(f.archived ? 'archived=true' : 'archived=all');
   try {
     const rows = await api('GET', '/contacts' + (parts.length ? '?' + parts.join('&') : '')) || [];
     state.contactList = rows;
-    if (!filtersActive()) state.contacts = rows; // keep the master list fresh too
+    if (!f.archived) state.contacts = rows; // master list (incl. archived) stays fresh
     renderContactTable(rows);
   } catch (e) {
     const box = $('#contactTable');
@@ -1086,6 +1131,11 @@ function renderContactTable(list) {
   var box = $('#contactTable');
   if (!box) return;
 
+  // Hide archived (dead) deals unless we're explicitly in the Archive view.
+  if (!state.filters.archived) {
+    list = (list || []).filter(function (c) { return !truthy(c.archived); });
+  }
+
   if (!list.length) {
     renderBulkBar();
     box.innerHTML = '<div class="empty">' +
@@ -1113,7 +1163,7 @@ function renderContactTable(list) {
 
   rows.forEach(function (c) {
     var tags = '';
-    if ((c.source === 'Lead' || c.source === 'Lead Engine') && (c.stage || STAGES[0]) === 'Prospect') tags += ' <span class="tag lead">NEW LEAD</span>';
+    if ((c.source === 'Lead' || c.source === 'Lead Engine') && (c.stage || STAGES[0]) === STAGES[0]) tags += ' <span class="tag lead">NEW LEAD</span>';
     if (truthy(c.isFsbo)) tags += ' <span class="tag warn">FSBO</span>';
     var link = c.sourceUrl || c.zillow;
     var idStr = String(c.id);
@@ -1307,11 +1357,17 @@ function openContactModal(contact, leadDraft) {
   // ---- Details
   html += '<div class="sec" style="margin-top:0"><h4>Details</h4><div class="grid2">';
   CONTACT_TEXT_FIELDS.forEach(function (f) { html += fieldHtml(f, c[f.key] || ''); });
-  html += '<div class="field"><label>Stage</label><select data-field="stage">';
+  html += '<div class="field"><label>Stage</label><select data-field="stage" id="stageSelect">';
   STAGES.forEach(function (s) {
     html += '<option value="' + escAttr(s) + '"' + ((c.stage || STAGES[0]) === s ? ' selected' : '') + '>' + esc(s) + '</option>';
   });
   html += '</select></div>';
+  // Estimated wholesale (assignment) fee + lead-source tag.
+  html += numFieldHtml('wholesale_fee', 'Est. Wholesale Fee ($)', c.wholesale_fee);
+  html += '<div class="field"><label>Lead Source (tag)</label>' +
+    '<input type="text" list="leadSrcList" data-field="lead_source" value="' + escAttr(c.lead_source || '') + '" placeholder="e.g. Zillow, Manual Upload, or your own tag">' +
+    '<datalist id="leadSrcList">' + LEAD_SOURCES.map(function (s) { return '<option value="' + escAttr(s) + '">'; }).join('') + '</datalist>' +
+    '</div>';
   html += '</div>' +
     '<div class="field" style="margin-top:14px"><label>Notes</label>' +
     '<textarea data-field="notes" rows="3">' + esc(c.notes || '') + '</textarea></div>' +
@@ -1388,15 +1444,34 @@ function openContactModal(contact, leadDraft) {
     fieldHtml({ key: 'fsboEmail', label: 'FSBO Email' }, c.fsboEmail || '') +
     '</div></div>';
 
-  // ---- Listing agent
-  html += '<div class="sec"><h4>Listing Agent</h4><div class="grid3">';
+  // ---- Listing agent (hidden entirely when FSBO is on — no listing agent)
+  html += '<div class="sec" id="agentSection"' + (fsboOn ? ' style="display:none"' : '') + '><h4>Listing Agent</h4><div class="grid3">';
   AGENT_FIELDS.forEach(function (f) { html += fieldHtml(f, c[f.key] || ''); });
   html += '</div></div>';
 
-  // ---- Dates
+  // ---- Dates (Offer Accepted date auto-fills when the stage hits Offer Accepted)
   html += '<div class="sec"><h4>Important Dates</h4><div class="grid2">';
+  html += '<div class="field"><label>Offer Accepted Date</label>' +
+    '<input type="date" data-field="offerAcceptedDate" value="' + escAttr(dateInputVal(c.offerAcceptedDate)) + '"></div>';
   DATE_FIELDS.forEach(function (f) { html += fieldHtml(f, dateInputVal(c[f.key]), 'date'); });
-  html += '</div></div>';
+  html += '</div><p class="hint" style="margin:8px 0 0">Moving the stage to “Offer Accepted” auto-fills the accepted date if it’s blank.</p></div>';
+
+  // ---- Dead Deal / archive outcome (used when the stage is "Dead Deal")
+  {
+    const dr = c.dead_reason || '';
+    html += '<div class="sec" id="deadSection"' + (c.stage === DEAD_STAGE ? '' : ' style="display:none"') + '>' +
+      '<h4>Dead Deal / Archive</h4>' +
+      '<p class="hint" style="margin:0 0 10px">Set the outcome — the deal is filed to the Archive when saved. You can reactivate it later by changing the stage.</p>' +
+      '<div class="grid2">' +
+      '<div class="field"><label>Reason</label><select data-field="dead_reason">' +
+      '<option value=""' + (!dr ? ' selected' : '') + '>— select —</option>' +
+      DEAD_REASONS.map(function (r) { return '<option value="' + escAttr(r) + '"' + (dr === r ? ' selected' : '') + '>' + esc(r) + '</option>'; }).join('') +
+      '</select></div>' +
+      '</div>' +
+      '<div class="field" style="margin-top:14px"><label>Notes</label>' +
+      '<textarea data-field="dead_notes" rows="3" placeholder="e.g. seller went with another buyer, wanted more than we could pay...">' + esc(c.dead_notes || '') + '</textarea></div>' +
+      '</div>';
+  }
 
   // ---- Compliance
   html += '<div class="sec"><h4>Compliance</h4><div class="toggles">' +
@@ -1560,6 +1635,18 @@ function openContactModal(contact, leadDraft) {
     fsboCb.addEventListener('change', function () {
       const box = $('#fsboFields', overlay);
       if (box) box.style.display = fsboCb.checked ? '' : 'none';
+      // FSBO = no listing agent → hide the whole Listing Agent section.
+      const agentSec = $('#agentSection', overlay);
+      if (agentSec) agentSec.style.display = fsboCb.checked ? 'none' : '';
+    });
+  }
+
+  // Stage → Dead Deal reveals the Dead Deal / Archive outcome section.
+  const stageSel = $('#stageSelect', overlay);
+  if (stageSel) {
+    stageSel.addEventListener('change', function () {
+      const dead = $('#deadSection', overlay);
+      if (dead) dead.style.display = stageSel.value === DEAD_STAGE ? '' : 'none';
     });
   }
 
@@ -1588,7 +1675,7 @@ function openContactModal(contact, leadDraft) {
           payload.name = payload.sellerName || payload.agentName || payload.property || 'New Lead';
         }
         saved = await api('POST', isLead ? '/leads' : '/contacts', payload);
-        toast(isLead ? 'New lead saved to Prospect' : 'Contact created', 'ok');
+        toast(isLead ? 'New lead saved to ' + STAGES[0] : 'Contact created', 'ok');
       } else {
         saved = await api('PATCH', '/contacts/' + encodeURIComponent(c.id), payload);
         toast('Contact saved', 'ok');
