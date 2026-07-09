@@ -3930,9 +3930,12 @@ async function openTwoFactorSetup(forced) {
   const body =
     '<div class="mbody">' +
     (forced ? '<div class="banner">Two-factor authentication is required for admin accounts. Please finish setup to continue.</div>' : '') +
-    '<p class="hint"><b>1.</b> Install an authenticator app — Google Authenticator, Microsoft Authenticator, or Authy.<br>' +
-    '<b>2.</b> <u>Open that app first</u> and use its <b>+ / Scan a QR code</b> button to scan the code below. ' +
-    'Do <b>not</b> point your phone\'s camera at it — the camera sends it to your saved passwords, not to the authenticator.<br>' +
+    '<div style="background:rgba(239,68,68,.16);border:1px solid rgba(239,68,68,.5);border-radius:10px;padding:12px 14px;margin:0 0 12px;font-weight:800;color:#fecaca;line-height:1.45">' +
+    'IMPORTANT: The QR code MUST be scanned from INSIDE an authenticator app.<br>' +
+    'Do NOT use your phone\'s camera and do NOT tap the code — that opens your Saved Passwords, not your authenticator.' +
+    '</div>' +
+    '<p class="hint"><b>1. Install an authenticator app</b> — Google Authenticator, Microsoft Authenticator, or Authy.<br>' +
+    '<b>2. Open that app FIRST</b>, then tap its <b>+ / "Scan a QR code"</b> button and scan the code below <b>from inside the app</b>.<br>' +
     '<b>3.</b> Type the 6-digit code the authenticator shows to confirm.</p>' +
     '<div style="text-align:center;margin:12px 0">' + qrImg + '</div>' +
     '<p class="hint" style="text-align:center">Can\'t scan? In your authenticator app choose <b>Enter a setup key</b> and type the key below (account name: Deal Flow Pro).</p>' +
