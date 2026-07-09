@@ -124,10 +124,23 @@ function userNumber(userId) {
   return FROM_NUMBER();
 }
 
-/** Extract a CRM user id from a Twilio Voice `Caller` like "client:crm_<id>". */
+/**
+ * Extract a CRM user id from a Twilio Voice `Caller` like "client:crm_<identity>".
+ * The client identity strips non-alphanumerics from the user id (identityFor),
+ * so we can't reverse it directly — instead we match each user's identityFor(id)
+ * against the caller's identity to recover the real (dashed) user id.
+ */
 function userIdFromCaller(caller) {
-  const m = String(caller || '').match(/client:crm_(.+)$/);
-  return m ? m[1] : null;
+  const m = String(caller || '').match(/client:(.+)$/);
+  if (!m) return null;
+  const ident = m[1];
+  try {
+    const rows = db.prepare('SELECT id FROM users').all();
+    for (const r of rows) {
+      if (identityFor(r.id) === ident) return r.id;
+    }
+  } catch (e) {}
+  return null;
 }
 
 /** Find the user who owns a given CRM number (matches trailing 10 digits). */
