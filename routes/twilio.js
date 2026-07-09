@@ -41,9 +41,25 @@ const FROM_NUMBER = () => process.env.TWILIO_FROM || process.env.TWILIO_FROM_NUM
 function voiceConfigured() {
   return Boolean(ACCOUNT_SID() && API_KEY_SID() && API_KEY_SECRET() && TWIML_APP_SID());
 }
-/** SMS send is usable with the account auth token + a from number. */
-function smsConfigured() {
-  return Boolean(ACCOUNT_SID() && process.env.TWILIO_AUTH_TOKEN && FROM_NUMBER());
+/**
+ * SMS send is usable with the account auth token + SOME from number — either the
+ * shared TWILIO_FROM or (for a specific user) their own assigned sending_number.
+ */
+function smsConfigured(userId) {
+  if (!(ACCOUNT_SID() && process.env.TWILIO_AUTH_TOKEN)) return false;
+  if (FROM_NUMBER()) return true;
+  if (userId) {
+    try {
+      const u = db.prepare('SELECT sending_number FROM users WHERE id = ?').get(userId);
+      if (u && u.sending_number) return true;
+    } catch (e) {}
+  }
+  // Configured if ANY user has their own number (so the feature shows as available).
+  try {
+    const n = db.prepare("SELECT COUNT(*) AS c FROM users WHERE sending_number IS NOT NULL AND sending_number != ''").get();
+    return !!(n && n.c > 0);
+  } catch (e) {}
+  return false;
 }
 
 /** Client identity for a CRM user (safe chars only). */
@@ -94,6 +110,81 @@ function normPhone(p) {
   return '+' + digits;
 }
 
+/** The base URL of this app (for webhook config). */
+function appBaseUrl() {
+  return (process.env.APP_BASE_URL || 'https://www.dealflowpro.net').replace(/\/+$/, '');
+}
+
+/** The Twilio number a given user sends from — their own, else the shared one. */
+function userNumber(userId) {
+  try {
+    const u = userId ? db.prepare('SELECT sending_number FROM users WHERE id = ?').get(userId) : null;
+    if (u && u.sending_number) return u.sending_number;
+  } catch (e) {}
+  return FROM_NUMBER();
+}
+
+/** Extract a CRM user id from a Twilio Voice `Caller` like "client:crm_<id>". */
+function userIdFromCaller(caller) {
+  const m = String(caller || '').match(/client:crm_(.+)$/);
+  return m ? m[1] : null;
+}
+
+/** Find the user who owns a given CRM number (matches trailing 10 digits). */
+function userByNumber(num) {
+  const digits = String(num || '').replace(/[^0-9]/g, '');
+  if (digits.length < 7) return null;
+  const last10 = digits.slice(-10);
+  try {
+    const full = db.prepare("SELECT id, name, sending_number FROM users WHERE sending_number IS NOT NULL AND sending_number != '' AND active = 1").all();
+    for (const r of full) {
+      if (String(r.sending_number).replace(/[^0-9]/g, '').slice(-10) === last10) return r;
+    }
+  } catch (e) {}
+  return null;
+}
+
+/** Twilio REST helper (Basic auth with the account SID + auth token). */
+async function twilioRest(method, urlPath, form) {
+  const sid = ACCOUNT_SID();
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) throw new Error('Twilio account is not configured');
+  const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+  const opts = { method, headers: { Authorization: `Basic ${auth}` } };
+  if (form) {
+    opts.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    opts.body = new URLSearchParams(form).toString();
+  }
+  const r = await fetch('https://api.twilio.com/2010-04-01/Accounts/' + sid + urlPath, opts);
+  const text = await r.text();
+  let json = null; try { json = JSON.parse(text); } catch (e) {}
+  if (!r.ok) throw new Error((json && json.message) || ('Twilio API error ' + r.status));
+  return json;
+}
+
+/** List every phone number owned by the Twilio account. */
+async function listAccountNumbers() {
+  const out = [];
+  let pageUrl = '/IncomingPhoneNumbers.json?PageSize=100';
+  for (let i = 0; i < 10 && pageUrl; i++) {
+    const j = await twilioRest('GET', pageUrl);
+    (j.incoming_phone_numbers || []).forEach(function (n) {
+      out.push({ sid: n.sid, phoneNumber: n.phone_number, friendlyName: n.friendly_name });
+    });
+    pageUrl = j.next_page_uri ? j.next_page_uri.replace('/2010-04-01/Accounts/' + ACCOUNT_SID(), '') : null;
+  }
+  return out;
+}
+
+/** Point a number's SMS + Voice webhooks at this CRM (so replies route in). */
+async function configureNumberWebhooks(numberSid) {
+  const base = appBaseUrl();
+  return twilioRest('POST', '/IncomingPhoneNumbers/' + numberSid + '.json', {
+    SmsUrl: base + '/api/twilio/sms-inbound', SmsMethod: 'POST',
+    VoiceUrl: base + '/api/twilio/voice-inbound', VoiceMethod: 'POST',
+  });
+}
+
 /** Find a contact whose phone matches the given number (by trailing 10 digits). */
 function findContactByPhone(num) {
   const digits = String(num || '').replace(/[^0-9]/g, '');
@@ -133,7 +224,108 @@ function logActivity({ contactId, ownerId, type, direction, body, status, provid
 
 /** GET /api/twilio/status — what's configured (for the frontend). */
 router.get('/status', requireAuth, (req, res) => {
-  res.json({ voiceConfigured: voiceConfigured(), smsConfigured: smsConfigured(), from: FROM_NUMBER() || null });
+  let mine = null;
+  try {
+    const u = db.prepare('SELECT sending_number FROM users WHERE id = ?').get(req.user.id);
+    mine = (u && u.sending_number) || null;
+  } catch (e) {}
+  res.json({
+    voiceConfigured: voiceConfigured(),
+    smsConfigured: smsConfigured(req.user.id),
+    from: mine || FROM_NUMBER() || null,
+    myNumber: mine,
+    sharedNumber: FROM_NUMBER() || null,
+    poolAvailable: Boolean(ACCOUNT_SID() && process.env.TWILIO_AUTH_TOKEN),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-user number pool: admin pre-buys numbers in Twilio; each user self-claims
+// one here. Claiming assigns it and auto-points its webhooks back at this CRM.
+// ---------------------------------------------------------------------------
+
+/** GET /api/twilio/numbers — the account's numbers with who has claimed each. */
+router.get('/numbers', requireAuth, async (req, res) => {
+  if (!(ACCOUNT_SID() && process.env.TWILIO_AUTH_TOKEN)) {
+    return res.status(400).json({ error: 'Twilio account is not configured on this server' });
+  }
+  try {
+    const nums = await listAccountNumbers();
+    const claims = db.prepare("SELECT id, name, sending_number FROM users WHERE sending_number IS NOT NULL AND sending_number != ''").all();
+    const byTail = {};
+    claims.forEach(function (u) { byTail[String(u.sending_number).replace(/[^0-9]/g, '').slice(-10)] = u; });
+    const out = nums.map(function (n) {
+      const owner = byTail[String(n.phoneNumber).replace(/[^0-9]/g, '').slice(-10)] || null;
+      return {
+        sid: n.sid, phoneNumber: n.phoneNumber, friendlyName: n.friendlyName,
+        claimedBy: owner ? { id: owner.id, name: owner.name } : null,
+        mine: !!(owner && owner.id === req.user.id),
+      };
+    });
+    let myNumber = null;
+    try { const u = db.prepare('SELECT sending_number FROM users WHERE id = ?').get(req.user.id); myNumber = (u && u.sending_number) || null; } catch (e) {}
+    res.json({ numbers: out, myNumber });
+  } catch (e) {
+    res.status(502).json({ error: 'Could not reach Twilio: ' + (e.message || 'unknown error') });
+  }
+});
+
+/** POST /api/twilio/numbers/claim {phoneNumber} — take an unclaimed number. */
+router.post('/numbers/claim', requireAuth, async (req, res) => {
+  const wanted = normPhone((req.body || {}).phoneNumber || '');
+  if (!wanted) return res.status(400).json({ error: 'phoneNumber is required' });
+  const tail = wanted.replace(/[^0-9]/g, '').slice(-10);
+  try {
+    // Must be a number the account actually owns.
+    const nums = await listAccountNumbers();
+    const match = nums.find(function (n) { return String(n.phoneNumber).replace(/[^0-9]/g, '').slice(-10) === tail; });
+    if (!match) return res.status(404).json({ error: 'That number is not in your Twilio account' });
+    // Must not already belong to another user.
+    const owner = userByNumber(match.phoneNumber);
+    if (owner && owner.id !== req.user.id) {
+      return res.status(409).json({ error: 'That number is already assigned to ' + (owner.name || 'another user') });
+    }
+    // Point the number's SMS + Voice webhooks at this CRM, then assign it.
+    await configureNumberWebhooks(match.sid);
+    db.prepare('UPDATE users SET sending_number = ? WHERE id = ?').run(match.phoneNumber, req.user.id);
+    res.json({ ok: true, phoneNumber: match.phoneNumber });
+  } catch (e) {
+    res.status(502).json({ error: 'Could not claim number: ' + (e.message || 'unknown error') });
+  }
+});
+
+/** POST /api/twilio/numbers/release {userId?} — give up a number (admin may release others'). */
+router.post('/numbers/release', requireAuth, (req, res) => {
+  let targetId = req.user.id;
+  const asked = (req.body || {}).userId;
+  if (asked && asked !== req.user.id) {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only an admin can release another user’s number' });
+    targetId = asked;
+  }
+  db.prepare('UPDATE users SET sending_number = NULL WHERE id = ?').run(targetId);
+  res.json({ ok: true });
+});
+
+/** POST /api/twilio/numbers/assign {userId, phoneNumber} — admin assigns a number to a user. */
+router.post('/numbers/assign', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+  const { userId } = req.body || {};
+  const wanted = normPhone((req.body || {}).phoneNumber || '');
+  if (!userId || !wanted) return res.status(400).json({ error: 'userId and phoneNumber are required' });
+  const tail = wanted.replace(/[^0-9]/g, '').slice(-10);
+  try {
+    const nums = await listAccountNumbers();
+    const match = nums.find(function (n) { return String(n.phoneNumber).replace(/[^0-9]/g, '').slice(-10) === tail; });
+    if (!match) return res.status(404).json({ error: 'That number is not in your Twilio account' });
+    // Clear it from anyone else first.
+    db.prepare("SELECT id, sending_number FROM users WHERE sending_number IS NOT NULL AND sending_number != ''").all()
+      .forEach(function (u) { if (String(u.sending_number).replace(/[^0-9]/g, '').slice(-10) === tail) db.prepare('UPDATE users SET sending_number = NULL WHERE id = ?').run(u.id); });
+    await configureNumberWebhooks(match.sid);
+    db.prepare('UPDATE users SET sending_number = ? WHERE id = ?').run(match.phoneNumber, userId);
+    res.json({ ok: true, phoneNumber: match.phoneNumber });
+  } catch (e) {
+    res.status(502).json({ error: 'Could not assign number: ' + (e.message || 'unknown error') });
+  }
 });
 
 /** GET /api/twilio/token — Voice Access Token for this user's browser client. */
@@ -161,7 +353,9 @@ router.post('/voice', (req, res) => {
   if (!to) {
     return res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No destination number.</Say></Response>');
   }
-  const from = xmlEscape(FROM_NUMBER());
+  // Use the CALLING user's own number as caller ID (falls back to the shared one).
+  const callerUserId = userIdFromCaller((req.body && req.body.Caller) || (req.query && req.query.Caller) || '');
+  const from = xmlEscape(userNumber(callerUserId) || FROM_NUMBER());
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
     `<Response><Dial callerId="${from}" answerOnBridge="true"><Number>${xmlEscape(to)}</Number></Dial></Response>`
@@ -176,7 +370,12 @@ router.post('/voice', (req, res) => {
  */
 router.post('/voice-inbound', (req, res) => {
   res.set('Content-Type', 'text/xml');
-  let targetUserId = process.env.TWILIO_INBOUND_IDENTITY || null;
+  // Route to whoever owns the number that was called (the "To").
+  let targetUserId = null;
+  const dialed = (req.body && (req.body.To || req.body.Called)) || '';
+  const owner = userByNumber(dialed);
+  if (owner) targetUserId = owner.id;
+  if (!targetUserId) targetUserId = process.env.TWILIO_INBOUND_IDENTITY || null;
   if (!targetUserId) {
     const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY created_at ASC LIMIT 1").get();
     targetUserId = admin ? admin.id : null;
@@ -329,9 +528,12 @@ router.post('/voicemail-transcribe', (req, res) => {
 router.post('/sms', requireAuth, async (req, res) => {
   const { contactId, to, body } = req.body || {};
   if (!to || !body) return res.status(400).json({ error: 'to and body are required' });
-  if (!smsConfigured()) return res.status(400).json({ error: 'Twilio SMS is not configured on this server' });
+  if (!smsConfigured(req.user.id)) return res.status(400).json({ error: 'Twilio SMS is not configured on this server' });
 
-  const result = await sendSms({ to: normPhone(to), body: String(body), from: FROM_NUMBER() });
+  // Send from THIS user's own number if they have one; else the shared number.
+  const fromNum = userNumber(req.user.id);
+  if (!fromNum) return res.status(400).json({ error: 'No sending number is assigned to your account. Set one in Settings.' });
+  const result = await sendSms({ to: normPhone(to), body: String(body), from: fromNum });
 
   // Log the outbound text against the contact (if we know it).
   let contact = null;
@@ -356,22 +558,27 @@ router.post('/sms', requireAuth, async (req, res) => {
 router.post('/sms-inbound', (req, res) => {
   try {
     const from = (req.body && (req.body.From || req.body.from)) || '';
+    const toNum = (req.body && (req.body.To || req.body.to)) || '';
     const bodyText = (req.body && (req.body.Body || req.body.body)) || '';
     const sid = (req.body && (req.body.MessageSid || req.body.SmsSid)) || null;
     const contact = findContactByPhone(from);
+    // Who owns the CRM number that was texted?
+    const numberOwner = userByNumber(toNum);
     if (contact) {
       logActivity({
         contactId: contact.id, ownerId: contact.owner_id, type: 'sms', direction: 'inbound',
         body: String(bodyText), status: 'received', providerId: sid, createdBy: contact.owner_id,
       });
       try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
-      // Push alert to the contact's owner.
+      // Push alert to the contact's owner, and to the number's owner (if different).
       try {
         const label = db.prepare('SELECT name FROM contacts WHERE id = ?').get(contact.id);
-        sendPushToUser(contact.owner_id, {
+        const payload = {
           title: 'New text' + (label && label.name ? ' from ' + label.name : ''),
           body: String(bodyText).slice(0, 140), url: '/', tag: 'sms-' + contact.id,
-        });
+        };
+        sendPushToUser(contact.owner_id, payload);
+        if (numberOwner && numberOwner.id !== contact.owner_id) sendPushToUser(numberOwner.id, payload);
       } catch (e) {}
     } else {
       console.log('[twilio] inbound SMS from unknown number:', from);
