@@ -43,11 +43,16 @@ function stop() {
   }
 }
 
-/** Resolve which user owns auto-imported leads. */
+/**
+ * Resolve which user owns auto-imported leads. POLICY: the daily auto-import
+ * only ever feeds an ADMIN pool — regular reps get their leads by uploading
+ * their own CSV. A configured import_owner_id is honored only if that user is
+ * an active admin; otherwise we fall back to the first admin.
+ */
 function resolveImportOwner() {
   const configured = getSetting('import_owner_id');
   if (configured) {
-    const u = db.prepare('SELECT id FROM users WHERE id = ?').get(configured);
+    const u = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'admin' AND active = 1").get(configured);
     if (u) return u.id;
   }
   const admin = db

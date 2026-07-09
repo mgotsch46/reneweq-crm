@@ -16,6 +16,8 @@
     "firebase-admin": "^12.7.0",
     "jsonwebtoken": "^9.0.2",
     "node-cron": "^4.6.0",
+    "qrcode": "^1.5.4",
+    "speakeasy": "^2.0.0",
     "web-push": "^3.6.7"
   }
 }

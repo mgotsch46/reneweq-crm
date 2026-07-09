@@ -29,6 +29,7 @@ const twilioRoutes = require('./routes/twilio');
 const documentRoutes = require('./routes/documents');
 const rvmRoutes = require('./routes/rvm');
 const pushRoutes = require('./routes/push');
+const securityRoutes = require('./routes/security');
 const scheduler = require('./scheduler'); // Lead Engine daily auto-import + RVM ticker
 
 const app = express();
@@ -88,6 +89,9 @@ app.use('/api', rvmRoutes);
 
 // PWA web-push subscriptions + notifications.
 app.use('/api/push', pushRoutes);
+
+// Per-user account security: password change + 2FA enrollment.
+app.use('/api', requireAuth, securityRoutes);
 
 // Admin-only user management
 app.use('/api/users', requireAuth, requireAdmin, userRoutes);

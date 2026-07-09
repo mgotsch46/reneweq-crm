@@ -421,6 +421,75 @@ const GOOGLE_TASK_COLUMNS = [
 }
 
 // ---------------------------------------------------------------------------
+// Idempotent migration — per-user security & account columns.
+//   password_enc          — AES-encrypted copy of the password so an admin can
+//                           reveal it (per product decision). Login still uses
+//                           the bcrypt password_hash; this is never used to auth.
+//   totp_secret           — base32 TOTP secret (2FA). Present but not yet
+//                           confirmed until totp_enabled = 1.
+//   totp_enabled          — 1 once the user has verified a code.
+//   vm_greeting_text      — this user's own inbound voicemail greeting (spoken).
+//   vm_greeting_recording_id — id of this user's recorded greeting clip.
+// ---------------------------------------------------------------------------
+
+const USER_SECURITY_COLUMNS = [
+  ['password_enc', 'TEXT'],
+  ['totp_secret', 'TEXT'],
+  ['totp_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['vm_greeting_text', 'TEXT'],
+  ['vm_greeting_recording_id', 'TEXT'],
+];
+
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(users)').all().map((col) => col.name)
+  );
+  for (const [name, type] of USER_SECURITY_COLUMNS) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reversible encryption (AES-256-GCM) for the admin-viewable password copy.
+// Key is derived from APP_SECRET (falls back to JWT_SECRET, then a constant so
+// dev still works). Format stored: "v1:<iv_hex>:<tag_hex>:<cipher_hex>".
+// ---------------------------------------------------------------------------
+
+const ENC_KEY = crypto
+  .createHash('sha256')
+  .update(String(process.env.APP_SECRET || process.env.JWT_SECRET || 'deal-flow-pro-dev-secret'))
+  .digest(); // 32 bytes
+
+/** encryptSecret(plain) -> string token (or null for empty input). */
+function encryptSecret(plain) {
+  if (plain === null || plain === undefined || plain === '') return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return 'v1:' + iv.toString('hex') + ':' + tag.toString('hex') + ':' + enc.toString('hex');
+}
+
+/** decryptSecret(token) -> plaintext string, or null if unset/undecryptable. */
+function decryptSecret(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split(':');
+  if (parts.length !== 4 || parts[0] !== 'v1') return null;
+  try {
+    const iv = Buffer.from(parts[1], 'hex');
+    const tag = Buffer.from(parts[2], 'hex');
+    const data = Buffer.from(parts[3], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  } catch (e) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Settings — simple key/value store (Lead Engine auto-import config, etc.).
 // ---------------------------------------------------------------------------
 
@@ -458,8 +527,8 @@ function seed() {
   if (count > 0) return; // already seeded
 
   const insertUser = db.prepare(`
-    INSERT INTO users (id, name, email, password_hash, role, business_number, active, created_at)
-    VALUES (@id, @name, @email, @password_hash, @role, @business_number, 1, @created_at)
+    INSERT INTO users (id, name, email, password_hash, password_enc, role, business_number, active, created_at)
+    VALUES (@id, @name, @email, @password_hash, @password_enc, @role, @business_number, 1, @created_at)
   `);
 
   const insertContact = db.prepare(`
@@ -494,6 +563,7 @@ function seed() {
       name: 'Admin',
       email: 'admin@demo.com',
       password_hash: bcrypt.hashSync('admin123', 10),
+      password_enc: encryptSecret('admin123'),
       role: 'admin',
       business_number: null,
       created_at: ts,
@@ -505,6 +575,7 @@ function seed() {
       name: 'Marisa',
       email: 'marisa@demo.com',
       password_hash: bcrypt.hashSync('demo123', 10),
+      password_enc: encryptSecret('demo123'),
       role: 'user',
       business_number: null,
       created_at: ts,
@@ -516,6 +587,7 @@ function seed() {
       name: 'Sample Rep',
       email: 'rep@demo.com',
       password_hash: bcrypt.hashSync('demo123', 10),
+      password_enc: encryptSecret('demo123'),
       role: 'user',
       business_number: null,
       created_at: ts,
@@ -596,4 +668,7 @@ seed();
 // Exports
 // ---------------------------------------------------------------------------
 
-module.exports = { db, uid, now, DATA_DIR, STAGES, DEFAULT_TEXTS, DEFAULT_RVM, getSetting, setSetting };
+module.exports = {
+  db, uid, now, DATA_DIR, STAGES, DEFAULT_TEXTS, DEFAULT_RVM,
+  getSetting, setSetting, encryptSecret, decryptSecret,
+};
