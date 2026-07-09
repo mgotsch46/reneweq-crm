@@ -500,7 +500,14 @@ const USER_SECURITY_COLUMNS = [
   ['totp_enabled', 'INTEGER NOT NULL DEFAULT 0'],
   ['vm_greeting_text', 'TEXT'],
   ['vm_greeting_recording_id', 'TEXT'],
+  ['timezone', "TEXT NOT NULL DEFAULT 'America/New_York'"], // each user's own tz
 ];
+
+// tasks gain a `reminded` flag so timed-task push reminders only fire once.
+{
+  const existing = new Set(db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name));
+  if (!existing.has('reminded')) db.exec('ALTER TABLE tasks ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0');
+}
 
 {
   const existing = new Set(

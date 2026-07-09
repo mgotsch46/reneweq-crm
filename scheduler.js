@@ -15,12 +15,88 @@
 'use strict';
 
 const cron = require('node-cron');
-const { db, getSetting } = require('./db');
+const { db, getSetting, uid, now } = require('./db');
 
 const DEFAULT_CRON = '0 6 * * *'; // 6am daily
 
 let job = null;
 let rvmJob = null;
+let workflowJob = null;
+
+/** Current wall-clock parts in a given IANA time zone. */
+function tzParts(tz) {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false, weekday: 'short',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date());
+  const g = {}; p.forEach(function (x) { g[x.type] = x.value; });
+  let hh = parseInt(g.hour, 10); if (hh === 24) hh = 0;
+  const mm = parseInt(g.minute, 10);
+  return { hh: hh, mm: mm, minutes: hh * 60 + mm, dateStr: g.year + '-' + g.month + '-' + g.day, weekday: g.weekday };
+}
+
+/**
+ * Once-a-minute worker: (a) push reminders for tasks/appointments whose time
+ * has arrived, and (b) create the 4pm end-of-day review task (per user, in the
+ * user's own time zone) if any tasks remain open.
+ */
+function runWorkflowTick() {
+  let sendPushToUser = function () {};
+  try { sendPushToUser = require('./routes/push').sendPushToUser; } catch (e) {}
+  let users = [];
+  try { users = db.prepare("SELECT id, name, timezone FROM users WHERE active = 1").all(); } catch (e) { return; }
+  const ts = now();
+  for (const u of users) {
+    const tz = u.timezone || 'America/New_York';
+    let t;
+    try { t = tzParts(tz); } catch (e) { continue; }
+
+    // (a) Timed task / appointment reminders — fire once when the time arrives.
+    try {
+      const due = db.prepare(
+        "SELECT id, title, due_time FROM tasks WHERE owner_id = ? AND done = 0 AND reminded = 0 AND due_time IS NOT NULL AND due_time != '' AND substr(due_date,1,10) = ?"
+      ).all(u.id, t.dateStr);
+      for (const task of due) {
+        const parts = String(task.due_time).split(':');
+        const dueMin = (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+        if (t.minutes >= dueMin) {
+          db.prepare('UPDATE tasks SET reminded = 1 WHERE id = ?').run(task.id);
+          try { sendPushToUser(u.id, { title: 'Task due now', body: task.title || 'You have a task due', url: '/' }); } catch (e) {}
+        }
+      }
+    } catch (e) {}
+
+    // (b) 4pm weekday review — create once/day if any tasks remain open.
+    try {
+      if (['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].indexOf(t.weekday) !== -1 && t.hh >= 16) {
+        const already = db.prepare(
+          "SELECT id FROM tasks WHERE owner_id = ? AND substr(due_date,1,10) = ? AND title LIKE 'Review today%'"
+        ).get(u.id, t.dateStr);
+        if (!already) {
+          const incomplete = db.prepare(
+            "SELECT COUNT(*) AS n FROM tasks WHERE owner_id = ? AND done = 0 AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND title NOT LIKE 'Review today%'"
+          ).get(u.id, t.dateStr).n;
+          if (incomplete > 0) {
+            db.prepare('INSERT INTO tasks (id, owner_id, title, due_date, done, reminded, created_at) VALUES (?,?,?,?,0,1,?)')
+              .run(uid(), u.id, "Review today's tasks — reschedule, eliminate, or delegate (" + incomplete + " open)", t.dateStr, ts);
+            try { sendPushToUser(u.id, { title: 'End-of-day review', body: 'You have ' + incomplete + " open task(s). Reschedule, eliminate, or delegate.", url: '/' }); } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+  }
+}
+
+/** Start the once-a-minute workflow ticker (task reminders + 4pm review). */
+function startWorkflowTicker() {
+  if (workflowJob) return;
+  try {
+    workflowJob = cron.schedule('* * * * *', function () {
+      try { runWorkflowTick(); } catch (e) { console.error('[workflow] tick error:', e && e.message ? e.message : e); }
+    });
+    console.log('[workflow] scheduled task-reminder + 4pm review ticker (every minute)');
+  } catch (e) { console.error('[workflow] failed to start ticker:', e && e.message ? e.message : e); }
+}
 
 /** Start the once-a-minute ticker that sends any due scheduled RVMs. */
 function startRvmTicker() {
@@ -93,6 +169,7 @@ async function runNow() {
 /** (Re)schedule the daily auto-import from current settings. Never throws. */
 function reschedule() {
   startRvmTicker(); // always run the RVM ticker (independent of Lead Engine)
+  startWorkflowTicker(); // task reminders + 4pm review (always on)
   try {
     stop();
     const autoimport = (getSetting('leadengine_autoimport') || 'off') === 'on';
