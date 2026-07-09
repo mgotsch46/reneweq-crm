@@ -585,6 +585,20 @@ router.get('/:id/activities', (req, res) => {
   res.json(rows);
 });
 
+/**
+ * DELETE /api/contacts/:id/activities/:actId — remove one activity-log entry.
+ * ADMIN ONLY (regular users cannot delete history).
+ */
+router.delete('/:id/activities/:actId', (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only an admin can delete activity entries' });
+  const contact = getOwnedContact(req.params.id, req.user);
+  if (!contact) return res.status(404).json({ error: 'Contact not found' });
+  const act = db.prepare('SELECT id FROM activities WHERE id = ? AND contact_id = ?').get(req.params.actId, contact.id);
+  if (!act) return res.status(404).json({ error: 'Activity not found' });
+  db.prepare('DELETE FROM activities WHERE id = ?').run(act.id);
+  res.json({ ok: true, deleted: act.id });
+});
+
 const ACTIVITY_TYPES = ['call', 'sms', 'email', 'rvm', 'note', 'stage'];
 
 /** POST /api/contacts/:id/activities {type,body,mode,direction} */
