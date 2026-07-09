@@ -202,9 +202,66 @@ async function submitAuth() {
     } else {
       out = await api('POST', '/auth/login', { email: email, password: password });
     }
-    setSession(out.token, out.user);
-    $('#authPassword').value = '';
-    await bootApp();
+    // 2FA challenge: password accepted, now a code is required.
+    if (out && out.twofaRequired) {
+      state.twofaTicket = out.ticket;
+      showTwoFactorPrompt();
+      return;
+    }
+    finishLogin(out);
+  } catch (e) {
+    errBox.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Complete a login response: store session, flag forced admin 2FA, boot. */
+async function finishLogin(out) {
+  state.force2faSetup = !!(out && out.require2faSetup);
+  setSession(out.token, out.user);
+  $('#authPassword').value = '';
+  const code = $('#twofaCode'); if (code) code.value = '';
+  await bootApp();
+}
+
+/** Swap the login card into "enter your 2FA code" mode. */
+function showTwoFactorPrompt() {
+  $('#authErr').textContent = '';
+  ['regNameField', 'authSubmit', 'authTogglRow'].forEach(function (id) {
+    const el = document.getElementById(id); if (el) el.style.display = 'none';
+  });
+  ['authEmail', 'authPassword'].forEach(function (id) {
+    const el = document.getElementById(id); if (el) el.closest('.field').style.display = 'none';
+  });
+  const box = $('#twofaBox'); if (box) box.style.display = '';
+  const code = $('#twofaCode'); if (code) { code.value = ''; code.focus(); }
+}
+
+/** Return the login card to its normal email/password state. */
+function resetLoginForm() {
+  ['authSubmit', 'authTogglRow'].forEach(function (id) {
+    const el = document.getElementById(id); if (el) el.style.display = '';
+  });
+  ['authEmail', 'authPassword'].forEach(function (id) {
+    const el = document.getElementById(id); if (el) el.closest('.field').style.display = '';
+  });
+  const reg = $('#regNameField'); if (reg) reg.style.display = state.registerMode ? '' : 'none';
+  const box = $('#twofaBox'); if (box) box.style.display = 'none';
+  $('#authErr').textContent = '';
+}
+
+async function submitTwoFactor() {
+  const errBox = $('#authErr');
+  errBox.textContent = '';
+  const code = ($('#twofaCode').value || '').trim();
+  if (!code) { errBox.textContent = 'Enter the 6-digit code from your authenticator app.'; return; }
+  const btn = $('#twofaSubmit'); btn.disabled = true;
+  try {
+    const out = await api('POST', '/auth/login/2fa', { ticket: state.twofaTicket, code: code });
+    state.twofaTicket = null;
+    resetLoginForm();
+    finishLogin(out);
   } catch (e) {
     errBox.textContent = e.message;
   } finally {
@@ -248,8 +305,14 @@ async function bootApp() {
   }
   $('#teamTabBtn').classList.toggle('hidden', !isAdmin());
 
+  // Admins: preload the user list so the "view by owner" filter shows names.
+  if (isAdmin()) { await refreshUsers().catch(function () {}); }
+
   await refreshContacts().catch(toastErr);
   switchTab('pipeline');
+
+  // If this admin still owes 2FA setup (required for their role), prompt now.
+  if (state.force2faSetup) { state.force2faSetup = false; openTwoFactorSetup(true); }
 
   // Unread calls/texts/voicemails alert badge (poll every 45s) + push.
   setupVoicemailBadge();
@@ -263,7 +326,39 @@ async function bootApp() {
 function isAdmin() { return state.user && state.user.role === 'admin'; }
 
 async function refreshContacts() {
-  state.contacts = await api('GET', '/contacts') || [];
+  // Admin lead view filter: 'mine' | '<userId>' | '' (all). Non-admins are
+  // always scoped to themselves by the server regardless of this value.
+  let qs = '';
+  if (isAdmin() && state.leadOwnerFilter) {
+    qs = state.leadOwnerFilter === 'mine'
+      ? '?mine=true'
+      : '?owner=' + encodeURIComponent(state.leadOwnerFilter);
+  }
+  state.contacts = await api('GET', '/contacts' + qs) || [];
+}
+
+/** Build the admin "view by owner" dropdown (All / Mine / each user). */
+function ownerFilterHtml() {
+  if (!isAdmin()) return '';
+  const cur = state.leadOwnerFilter || '';
+  let opts = '<option value=""' + (cur === '' ? ' selected' : '') + '>All users</option>' +
+    '<option value="mine"' + (cur === 'mine' ? ' selected' : '') + '>My leads only</option>';
+  (state.users || []).forEach(function (u) {
+    if (state.user && String(u.id) === String(state.user.id)) return; // "mine" covers self
+    opts += '<option value="' + escAttr(u.id) + '"' + (String(cur) === String(u.id) ? ' selected' : '') + '>' + esc(u.name) + '</option>';
+  });
+  return '<select class="inline" id="ownerFilter" title="View leads by owner">' + opts + '</select>';
+}
+
+/** Wire the owner-filter dropdown (if present) to reload + re-render. */
+function wireOwnerFilter(rerender) {
+  const sel = $('#ownerFilter');
+  if (!sel) return;
+  sel.addEventListener('change', async function () {
+    state.leadOwnerFilter = sel.value || '';
+    try { await refreshContacts(); } catch (e) { toastErr(e); }
+    if (typeof rerender === 'function') rerender();
+  });
 }
 async function refreshTasks() {
   state.tasks = await api('GET', '/tasks') || [];
@@ -571,12 +666,14 @@ function renderPipeline() {
      ['city', 'City (A–Z)'], ['state', 'State (A–Z)'], ['name', 'Contact name (A–Z)'], ['grade', 'Grade (A→F)']]
       .map(function (o) { return '<option value="' + o[0] + '"' + ((state.pipelineSort || 'newest') === o[0] ? ' selected' : '') + '>Sort: ' + o[1] + '</option>'; }).join('') +
     '  </select>' +
+    ownerFilterHtml() +
     '  <span class="hint">Drag cards between stages to update.</span>' +
     '</div>' +
     '<div class="board" id="board"></div>';
 
   $('#npBtn').addEventListener('click', function () { openContactModal(null); });
   $('#alBtn').addEventListener('click', openLeadIntake);
+  wireOwnerFilter(function () { renderPipeline(); });
 
   const search = $('#pipeSearch');
   if (search) {
@@ -790,6 +887,7 @@ function renderContacts() {
       return '<option value="' + escAttr(st) + '"' + (f.leadStatus === st ? ' selected' : '') + '>' + esc(st) + '</option>';
     }).join('') +
     '  </select>' +
+    (isAdmin() ? ownerFilterHtml() : '') +
     '  <button class="btn ghost small" id="fClear">Clear</button>' +
     '</div>' +
     '<div id="bulkBar"></div>' +
@@ -822,10 +920,11 @@ function renderContacts() {
     state.filters = { q: '', city: '', state: '', agent: '', fsbo: '', grade: '', leadStatus: '' };
     renderContacts();
   });
+  wireOwnerFilter(function () { renderContacts(); });
 
   // Bulk assign needs the user list (admin only).
   if (isAdmin() && !state.users.length) {
-    refreshUsers().then(renderBulkBar).catch(function () {});
+    refreshUsers().then(function () { renderBulkBar(); renderContacts(); }).catch(function () {});
   }
 
   applyContactFilters();
@@ -1119,6 +1218,30 @@ const DATE_FIELDS = [
 function closeModal() {
   $('#modalMount').innerHTML = '';
   state.openContactId = null;
+  state._modalDismissable = true;
+}
+
+/**
+ * Generic modal builder. `innerHtml` should already contain the .mbody (and an
+ * optional .mfoot). Pass { dismissable:false } to hide the X + disable
+ * click-outside/ESC dismissal (used for the mandatory admin 2FA enrollment).
+ */
+function openModal(title, innerHtml, opts) {
+  opts = opts || {};
+  const dismissable = opts.dismissable !== false;
+  const mount = $('#modalMount');
+  const closeBtn = dismissable ? '<button class="close" id="genModalClose" title="Close">&times;</button>' : '';
+  mount.innerHTML =
+    '<div class="overlay" id="genOverlay"><div class="modal" style="max-width:560px">' +
+    '<div class="mhead"><h3>' + esc(title) + '</h3>' + closeBtn + '</div>' +
+    innerHtml +
+    '</div></div>';
+  state._modalDismissable = dismissable;
+  const overlay = $('#genOverlay');
+  if (dismissable && overlay) {
+    overlay.addEventListener('mousedown', function (ev) { if (ev.target === overlay) closeModal(); });
+    const x = $('#genModalClose'); if (x) x.addEventListener('click', closeModal);
+  }
 }
 
 function fieldHtml(f, value, type) {
@@ -2721,15 +2844,26 @@ function renderTeam() {
     '<button class="btn" id="nuAdd">Add User</button>' +
     '</div>';
 
+  html += '<div class="banner" style="margin-top:0">As the admin you can see and reset every user’s password here. Passwords set before this feature was added show as “— (reset to view)”; use <b>Edit</b> to set a new one, which then becomes visible.</div>';
+
   html += '<div class="tablewrap"><table><thead><tr>' +
-    '<th>Name</th><th>Email</th><th>Role</th><th>Contacts</th><th>Open Tasks</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    '<th>Name</th><th>Email</th><th>Password</th><th>2FA</th><th>Role</th><th>Contacts</th><th>Open Tasks</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   state.users.forEach(function (u) {
     const isSelf = state.user && String(u.id) === String(state.user.id);
     const contacts = (u.contact_count !== undefined) ? u.contact_count : (u.contactCount !== undefined ? u.contactCount : '');
     const openTasks = (u.open_task_count !== undefined) ? u.open_task_count : (u.openTaskCount !== undefined ? u.openTaskCount : '');
+    const pwCell = (u.password != null && u.password !== '')
+      ? '<span class="pwmask" data-pw="' + escAttr(u.password) + '">••••••••</span> ' +
+        '<button class="btn ghost small" data-pw-toggle title="Show / hide">Show</button>'
+      : '<span class="hint">— (reset to view)</span>';
+    const twofaCell = truthy(u.totp_enabled)
+      ? '<span class="tag">On</span> ' + (isSelf ? '' : '<button class="btn ghost small" data-2fa-reset title="Clear this user’s 2FA if they lost their device">Reset</button>')
+      : '<span class="hint">Off</span>';
     html += '<tr data-id="' + escAttr(u.id) + '">' +
       '<td>' + esc(u.name) + (isSelf ? ' <span class="tag blue">you</span>' : '') + '</td>' +
       '<td>' + esc(u.email) + '</td>' +
+      '<td class="nowrap">' + pwCell + '</td>' +
+      '<td class="nowrap">' + twofaCell + '</td>' +
       '<td><select class="inline" data-role' + (isSelf ? ' disabled' : '') + '>' +
       '<option value="user"' + (u.role === 'user' ? ' selected' : '') + '>user</option>' +
       '<option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>admin</option>' +
@@ -2745,7 +2879,7 @@ function renderTeam() {
       '</td>' +
       '</tr>' +
       // Hidden inline editor for this user (name / email / optional new password).
-      '<tr class="editrow" data-editrow style="display:none"><td colspan="7">' +
+      '<tr class="editrow" data-editrow style="display:none"><td colspan="9">' +
       '<div class="taskform">' +
       '<div class="field" style="flex:1"><label>Name</label><input type="text" data-eu-name value="' + escAttr(u.name) + '"></div>' +
       '<div class="field" style="flex:1"><label>Email</label><input type="email" data-eu-email value="' + escAttr(u.email) + '"></div>' +
@@ -2776,6 +2910,27 @@ function renderTeam() {
     const id = tr.getAttribute('data-id');
     const editRow = tr.nextElementSibling && tr.nextElementSibling.hasAttribute('data-editrow')
       ? tr.nextElementSibling : null;
+
+    // Password reveal toggle
+    const pwToggle = $('[data-pw-toggle]', tr);
+    if (pwToggle) pwToggle.addEventListener('click', function () {
+      const span = $('.pwmask', tr);
+      if (!span) return;
+      const showing = span.getAttribute('data-shown') === '1';
+      if (showing) { span.textContent = '••••••••'; span.setAttribute('data-shown', '0'); pwToggle.textContent = 'Show'; }
+      else { span.textContent = span.getAttribute('data-pw') || ''; span.setAttribute('data-shown', '1'); pwToggle.textContent = 'Hide'; }
+    });
+
+    // Reset this user's 2FA (they lost their device)
+    const twofaReset = $('[data-2fa-reset]', tr);
+    if (twofaReset) twofaReset.addEventListener('click', async function () {
+      if (!window.confirm('Clear this user’s 2FA? They’ll sign in with just their password until they set it up again.')) return;
+      try {
+        await api('POST', '/users/' + encodeURIComponent(id) + '/2fa-reset');
+        toast('2FA reset for user', 'ok');
+        await refreshUsers(); renderTeam();
+      } catch (e) { toastErr(e); }
+    });
 
     const roleSel = $('[data-role]', tr);
     if (roleSel) roleSel.addEventListener('change', async function () {
@@ -2908,9 +3063,14 @@ function renderLeadEngine() {
     '<input class="search" id="leUrl" type="url" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" style="flex:1;min-width:260px">' +
     '<button class="btn" id="leRun">RUN Sync</button>' +
     '</div>' +
-    '<h3 style="margin-top:20px">Upload a file</h3>' +
-    '<p class="hint" style="margin:6px 0 10px">Import directly from a <b>.csv</b> or <b>.xlsx / .xls</b> file on your device — including Zillow exports. Columns are auto-mapped and graded A–F.</p>' +
+    '<h3 style="margin-top:20px">Upload your leads (CSV / Excel)</h3>' +
+    '<p class="hint" style="margin:6px 0 10px">Import from a <b>.csv</b> or <b>.xlsx / .xls</b> file on your device — including Zillow exports. Columns are auto-mapped and graded A–F. ' +
+    (admin ? 'Your uploaded leads are assigned to you.' : 'Leads you upload are assigned to <b>you</b> and are visible only to you and the admin.') +
+    ' Not sure of the format? Download the template below and fill it in.</p>' +
     '<div class="actions-row">' +
+    '<button class="btn ghost small" id="leTemplate">⬇ Download CSV template</button>' +
+    '</div>' +
+    '<div class="actions-row" style="margin-top:8px">' +
     '<input type="file" id="leFile" accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none">' +
     '<button class="btn" id="leFilePick">Choose CSV / Excel…</button>' +
     '<span class="hint" id="leFileName" style="align-self:center"></span>' +
@@ -3001,6 +3161,24 @@ function renderLeadEngine() {
     btn.textContent = orig;
   }
 
+  const leTpl = $('#leTemplate');
+  if (leTpl) leTpl.addEventListener('click', async function () {
+    this.disabled = true;
+    try {
+      const resp = await fetch('/api/leadengine/template.csv', {
+        headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+      });
+      if (!resp.ok) throw new Error('Could not download template');
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'Deal-Flow-Pro-lead-template.csv';
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (e) { toastErr(e); }
+    this.disabled = false;
+  });
+
   $('#leRun').addEventListener('click', function () {
     const url = $('#leUrl').value.trim();
     if (!url) { toast('Paste the Google Sheet link first.', 'error'); return; }
@@ -3078,21 +3256,19 @@ function renderSettings() {
     '(<code>TWILIO_ACCOUNT_SID</code>, <code>TWILIO_AUTH_TOKEN</code>, <code>TWILIO_FROM_NUMBER</code>) in the server’s ' +
     '<code>.env</code> file. Once those are set and the number’s A2P campaign is approved, the server switches to live mode automatically. ' +
     'Manual tap-to-text, tap-to-call, and email links in the contact modal work from your own device without any of that setup.</p>' +
-    (isAdmin()
-      ? '<h3 style="margin-top:18px">Voicemail Greeting</h3>' +
-        '<p class="hint">What callers hear when a call to your number goes to voicemail. Type a greeting (spoken by the system) and/or record your own voice — a recording, if present, is used instead of the text.</p>' +
-        '<div class="field"><label>Greeting text</label>' +
-        '<textarea id="vmGreetText" rows="2" placeholder="You\'ve reached Deal Flow Pro. Please leave a message after the tone, then hang up."></textarea></div>' +
-        '<div class="actions-row"><button class="btn small" id="vmGreetSave">Save text</button></div>' +
-        '<div class="rvmrec" style="margin-top:10px">' +
-        '  <button type="button" class="btn small" id="vmGreetRec">● Record greeting</button>' +
-        '  <button type="button" class="btn ghost small" id="vmGreetStop" disabled>■ Stop</button>' +
-        '  <span class="hint" id="vmGreetStatus"></span>' +
-        '  <audio id="vmGreetPreview" controls style="display:none;max-width:220px;height:34px;vertical-align:middle"></audio>' +
-        '  <button type="button" class="btn small" id="vmGreetSaveRec" disabled>Save recording</button>' +
-        '</div>' +
-        '<div id="vmGreetCurrent" class="doclist"></div>'
-      : '') +
+    '<h3 style="margin-top:18px">My Voicemail Greeting</h3>' +
+    '<p class="hint">Your own greeting — what callers hear when a call to you goes to voicemail. Only you can see and change this. Type a greeting (spoken by the system) and/or record your own voice — a recording, if present, is used instead of the text.</p>' +
+    '<div class="field"><label>Greeting text</label>' +
+    '<textarea id="vmGreetText" rows="2" placeholder="You\'ve reached Deal Flow Pro. Please leave a message after the tone, then hang up."></textarea></div>' +
+    '<div class="actions-row"><button class="btn small" id="vmGreetSave">Save text</button></div>' +
+    '<div class="rvmrec" style="margin-top:10px">' +
+    '  <button type="button" class="btn small" id="vmGreetRec">● Record greeting</button>' +
+    '  <button type="button" class="btn ghost small" id="vmGreetStop" disabled>■ Stop</button>' +
+    '  <span class="hint" id="vmGreetStatus"></span>' +
+    '  <audio id="vmGreetPreview" controls style="display:none;max-width:220px;height:34px;vertical-align:middle"></audio>' +
+    '  <button type="button" class="btn small" id="vmGreetSaveRec" disabled>Save recording</button>' +
+    '</div>' +
+    '<div id="vmGreetCurrent" class="doclist"></div>' +
     '<h3 style="margin-top:18px">Google Tasks &amp; Calendar</h3>' +
     '<div id="googleBox"><p class="hint">Checking Google status…</p></div>' +
     '<h3 style="margin-top:18px">Microsoft To Do &amp; Outlook Calendar</h3>' +
@@ -3101,13 +3277,126 @@ function renderSettings() {
     '<h3 style="margin-top:18px">Account</h3>' +
     '<div class="kv"><b>Signed in as:</b> ' + esc(state.user ? state.user.name : '') + ' (' + esc(state.user ? state.user.email : '') + ')</div>' +
     '<div class="kv"><b>Role:</b> ' + esc(state.user ? state.user.role : '') + '</div>' +
+
+    '<h3 style="margin-top:18px">Change my password</h3>' +
+    '<p class="hint">Update your own password anytime. You need your current one.</p>' +
+    '<div class="grid3">' +
+    '  <div class="field"><label>Current password</label><input id="pwCurrent" type="password" autocomplete="current-password"></div>' +
+    '  <div class="field"><label>New password</label><input id="pwNew" type="password" autocomplete="new-password"></div>' +
+    '  <div class="field"><label>Confirm new</label><input id="pwNew2" type="password" autocomplete="new-password"></div>' +
+    '</div>' +
+    '<div class="actions-row"><button class="btn small" id="pwSave">Update password</button><span class="hint" id="pwMsg"></span></div>' +
+
+    '<h3 style="margin-top:18px">Two-factor authentication (2FA)</h3>' +
+    '<div id="twofaBoxSettings"><p class="hint">Checking 2FA status…</p></div>' +
     '</div>';
 
   renderGoogleBox(); // render from cached status immediately...
   refreshGoogleStatus().then(renderGoogleBox); // ...then re-check the server
   renderMicrosoftBox();
   refreshMicrosoftStatus().then(renderMicrosoftBox);
-  if (isAdmin()) wireVmGreeting();
+  wireVmGreeting();        // per-user greeting for everyone
+  wirePasswordChange();    // self-service password change
+  refreshTwoFactorSection(); // 2FA status + enable/disable controls
+}
+
+/** Settings → self-service password change. */
+function wirePasswordChange() {
+  const btn = $('#pwSave');
+  if (!btn) return;
+  btn.addEventListener('click', async function () {
+    const cur = $('#pwCurrent').value, nw = $('#pwNew').value, nw2 = $('#pwNew2').value;
+    const msg = $('#pwMsg');
+    msg.textContent = '';
+    if (!cur || !nw) { msg.textContent = 'Fill in all fields.'; return; }
+    if (nw.length < 6) { msg.textContent = 'New password must be at least 6 characters.'; return; }
+    if (nw !== nw2) { msg.textContent = 'New passwords do not match.'; return; }
+    btn.disabled = true;
+    try {
+      await api('POST', '/account/password', { currentPassword: cur, newPassword: nw });
+      $('#pwCurrent').value = ''; $('#pwNew').value = ''; $('#pwNew2').value = '';
+      toast('Password updated', 'ok');
+    } catch (e) { msg.textContent = e.message; }
+    btn.disabled = false;
+  });
+}
+
+/** Settings → render current 2FA state + enable/disable controls. */
+async function refreshTwoFactorSection() {
+  const box = $('#twofaBoxSettings');
+  if (!box) return;
+  let st;
+  try { st = await api('GET', '/account/2fa/status'); }
+  catch (e) { box.innerHTML = '<p class="hint">Could not load 2FA status.</p>'; return; }
+
+  if (st.enabled) {
+    box.innerHTML =
+      '<div class="kv"><b>Status:</b> <span class="tag">On</span>' +
+      (st.required ? ' <span class="hint">(required for admins)</span>' : '') + '</div>' +
+      '<div class="actions-row"><button class="btn ghost small danger" id="twofaOff">Turn off 2FA</button></div>';
+    $('#twofaOff').addEventListener('click', async function () {
+      const code = window.prompt('Enter a current 2FA code (or your password) to turn 2FA off:');
+      if (!code) return;
+      try {
+        await api('POST', '/account/2fa/disable', { code: code, password: code });
+        toast('2FA turned off', 'ok');
+        refreshTwoFactorSection();
+      } catch (e) { toastErr(e); }
+    });
+  } else {
+    box.innerHTML =
+      '<div class="kv"><b>Status:</b> <span class="tag warn">Off</span>' +
+      (st.required ? ' <span class="hint">— required for your admin account, please turn it on</span>' : '') + '</div>' +
+      '<p class="hint">Protect your account with a code from an authenticator app (Google Authenticator, Authy, 1Password, etc.).</p>' +
+      '<div class="actions-row"><button class="btn small" id="twofaOn">Set up 2FA</button></div>';
+    $('#twofaOn').addEventListener('click', function () { openTwoFactorSetup(false); });
+  }
+}
+
+/**
+ * 2FA enrollment modal: fetches a secret + QR, shows both, verifies a code.
+ * When `forced` is true (admin who must enroll), the modal is not dismissable
+ * until 2FA is enabled.
+ */
+async function openTwoFactorSetup(forced) {
+  let data;
+  try { data = await api('POST', '/account/2fa/setup'); }
+  catch (e) { toastErr(e); return; }
+
+  const qrImg = data.qr ? '<img src="' + escAttr(data.qr) + '" alt="QR code" style="width:180px;height:180px;background:#fff;border-radius:10px;padding:6px">' : '';
+  const body =
+    '<div class="mbody">' +
+    (forced ? '<div class="banner">Two-factor authentication is required for admin accounts. Please finish setup to continue.</div>' : '') +
+    '<p class="hint">1. Install an authenticator app (Google Authenticator, Authy, 1Password…).<br>' +
+    '2. Scan this QR code, or enter the key manually.<br>' +
+    '3. Type the 6-digit code the app shows to confirm.</p>' +
+    '<div style="text-align:center;margin:12px 0">' + qrImg + '</div>' +
+    '<div class="kv" style="text-align:center"><b>Manual key:</b> <code>' + esc(data.secret || '') + '</code></div>' +
+    '<div class="field" style="max-width:220px;margin:14px auto 0"><label>6-digit code</label>' +
+    '<input id="twofaEnableCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></div>' +
+    '<div class="err" id="twofaSetupErr" style="text-align:center"></div>' +
+    '</div>' +
+    '<div class="mfoot">' +
+    (forced ? '' : '<button class="btn ghost" id="twofaSetupCancel">Cancel</button>') +
+    '<button class="btn blue" id="twofaEnableBtn">Verify &amp; turn on</button></div>';
+
+  openModal('Set up two-factor authentication', body, { dismissable: !forced });
+
+  const cancel = $('#twofaSetupCancel');
+  if (cancel) cancel.addEventListener('click', closeModal);
+  $('#twofaEnableBtn').addEventListener('click', async function () {
+    const code = ($('#twofaEnableCode').value || '').trim();
+    const err = $('#twofaSetupErr');
+    err.textContent = '';
+    if (!code) { err.textContent = 'Enter the 6-digit code.'; return; }
+    this.disabled = true;
+    try {
+      await api('POST', '/account/2fa/enable', { code: code });
+      closeModal();
+      toast('Two-factor authentication is on', 'ok');
+      refreshTwoFactorSection();
+    } catch (e) { err.textContent = e.message; this.disabled = false; }
+  });
 }
 
 /** Settings → Voicemail Greeting: text + recorded voice greeting. */
@@ -3307,6 +3596,12 @@ document.addEventListener('DOMContentLoaded', function () {
       if (ev.key === 'Enter') submitAuth();
     });
   });
+  const twofaSubmit = $('#twofaSubmit');
+  if (twofaSubmit) twofaSubmit.addEventListener('click', submitTwoFactor);
+  const twofaCode = $('#twofaCode');
+  if (twofaCode) twofaCode.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') submitTwoFactor(); });
+  const twofaCancel = $('#twofaCancel');
+  if (twofaCancel) twofaCancel.addEventListener('click', function () { state.twofaTicket = null; resetLoginForm(); });
 
   // nav
   $all('#navTabs button').forEach(function (b) {
@@ -3317,9 +3612,9 @@ document.addEventListener('DOMContentLoaded', function () {
     showLogin();
   });
 
-  // esc closes modal
+  // esc closes modal (unless the current modal is non-dismissable)
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape') closeModal();
+    if (ev.key === 'Escape' && state._modalDismissable !== false) closeModal();
   });
 
   // Toast + clean URL when returning from the Google consent screen.
