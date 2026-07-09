@@ -257,6 +257,7 @@ async function bootApp() {
   if (!state._vmPoll) state._vmPoll = setInterval(refreshVoicemailBadge, 45000);
   registerServiceWorker();
   setupPush();
+  setupNativePush();
 }
 
 function isAdmin() { return state.user && state.user.role === 'admin'; }
@@ -1742,6 +1743,13 @@ async function refreshVoicemailBadge() {
     }
     // Update the installed-app icon badge (Android + iOS 16.4+ installed PWA).
     try { if (navigator.setAppBadge) { n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge(); } } catch (e) {}
+    // Native app (Capacitor) icon badge.
+    try {
+      if (isNativeApp()) {
+        const Badge = capPlugin('Badge');
+        if (Badge) { if (n > 0) { Badge.set({ count: n }); } else if (Badge.clear) { Badge.clear(); } }
+      }
+    } catch (e) {}
   } catch (e) { /* ignore */ }
 }
 
@@ -1787,6 +1795,7 @@ async function subscribeForPush(vapidKey) {
 
 /** After login: if push is available, subscribe (or offer an "Enable alerts" button). */
 async function setupPush() {
+  if (isNativeApp()) return; // native app uses Firebase push, not web push
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
   let key = null;
   try { const r = await api('GET', '/push/key'); key = r && r.key; } catch (e) {}
@@ -1814,6 +1823,47 @@ async function setupPush() {
     }
   });
   topbar.insertBefore(b, who);
+}
+
+/* ---- Native app (Capacitor) push notifications + app badge ---- */
+
+// True only inside the installed Android/iOS app (Capacitor webview).
+function isNativeApp() {
+  try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+  catch (e) { return false; }
+}
+
+function capPlugin(name) {
+  try { return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]; }
+  catch (e) { return null; }
+}
+
+// Register for Firebase push inside the native app and forward the device
+// token to the CRM so the server can push to this phone.
+async function setupNativePush() {
+  if (!isNativeApp()) return;
+  const Push = capPlugin('PushNotifications');
+  if (!Push) return;
+  try {
+    Push.addListener('registration', async function (t) {
+      const token = t && (t.value || t.token);
+      if (!token) return;
+      let platform = 'android';
+      try { if (window.Capacitor.getPlatform) platform = window.Capacitor.getPlatform(); } catch (e) {}
+      try { await api('POST', '/push/native-register', { token: token, platform: platform }); } catch (e) {}
+    });
+    Push.addListener('registrationError', function (e) { console.warn('[push] native registration error:', e); });
+    Push.addListener('pushNotificationReceived', function () { try { refreshVoicemailBadge(); } catch (e) {} });
+    Push.addListener('pushNotificationActionPerformed', function () {
+      try { refreshVoicemailBadge(); } catch (e) {}
+      try { openMostRecentUnreadVm(); } catch (e) {}
+    });
+    let perm = await Push.checkPermissions();
+    if (perm && (perm.receive === 'prompt' || perm.receive === 'prompt-with-rationale')) {
+      perm = await Push.requestPermissions();
+    }
+    if (perm && perm.receive === 'granted') { await Push.register(); }
+  } catch (e) { console.warn('[push] native setup failed:', e && e.message); }
 }
 
 async function loadActivities(contactId) {
