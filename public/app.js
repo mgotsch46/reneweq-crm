@@ -644,22 +644,7 @@ function renderPipelineBoard() {
   board.innerHTML = html;
 
   // card events
-  $all('.pcard', board).forEach(function (card) {
-    card.addEventListener('click', function () {
-      const id = card.getAttribute('data-id');
-      const c = state.contacts.find(function (x) { return String(x.id) === String(id); });
-      if (c) openContactModal(c);
-    });
-    card.addEventListener('dragstart', function (ev) {
-      ev.dataTransfer.setData('text/plain', String(card.getAttribute('data-id')));
-      ev.dataTransfer.effectAllowed = 'move';
-      card.classList.add('dragging');
-    });
-    card.addEventListener('dragend', function () {
-      card.classList.remove('dragging');
-      $all('.col.dragover', board).forEach(function (col) { col.classList.remove('dragover'); });
-    });
-  });
+  $all('.pcard', board).forEach(wirePipelineCard);
 
   // column drop targets
   $all('.col', board).forEach(function (col) {
@@ -680,17 +665,70 @@ function renderPipelineBoard() {
       if (!c || !stage || c.stage === stage) return;
       const prev = c.stage;
       c.stage = stage;
-      renderPipelineBoard(); // optimistic
+      movePipelineCard(id, stage); // targeted move — no full re-render
       try {
         const updated = await api('PATCH', '/contacts/' + encodeURIComponent(id), { stage: stage });
         if (updated) replaceContact(updated);
         toast('Moved "' + (c.name || 'contact') + '" to ' + stage, 'ok');
       } catch (e) {
         c.stage = prev;
-        renderPipelineBoard();
+        movePipelineCard(id, prev);
         toastErr(e);
       }
     });
+  });
+}
+
+/** Attach click + drag handlers to a single pipeline card element. */
+function wirePipelineCard(card) {
+  const board = $('#board');
+  card.addEventListener('click', function () {
+    const id = card.getAttribute('data-id');
+    const c = state.contacts.find(function (x) { return String(x.id) === String(id); });
+    if (c) openContactModal(c);
+  });
+  card.addEventListener('dragstart', function (ev) {
+    ev.dataTransfer.setData('text/plain', String(card.getAttribute('data-id')));
+    ev.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+    if (board) board.classList.add('is-dragging');
+  });
+  card.addEventListener('dragend', function () {
+    card.classList.remove('dragging');
+    if (board) {
+      board.classList.remove('is-dragging');
+      $all('.col.dragover', board).forEach(function (col) { col.classList.remove('dragover'); });
+    }
+  });
+}
+
+/** Move one card into the target stage column in-place (no board rebuild). */
+function movePipelineCard(id, stage) {
+  const board = $('#board');
+  if (!board) return;
+  const oldCard = board.querySelector('.pcard[data-id="' + id + '"]');
+  const targetCol = board.querySelector('.col[data-stage="' + escAttr(stage) + '"]');
+  const targetCards = targetCol ? targetCol.querySelector('.cards') : null;
+  const c = state.contacts.find(function (x) { return String(x.id) === String(id); });
+  if (!oldCard || !targetCards || !c) { renderPipelineBoard(); return; }
+  // Rebuild the card fresh so stage-dependent tags (e.g. NEW LEAD) stay correct.
+  const tmp = document.createElement('div');
+  tmp.innerHTML = pipelineCardHtml(c);
+  const newCard = tmp.firstChild;
+  oldCard.remove();
+  targetCards.insertBefore(newCard, targetCards.firstChild);
+  wirePipelineCard(newCard);
+  refreshPipelineCounts();
+}
+
+/** Recompute the little count badge on each pipeline column header. */
+function refreshPipelineCounts() {
+  const board = $('#board');
+  if (!board) return;
+  $all('.col', board).forEach(function (col) {
+    const n = $all('.pcard', col).length;
+    const badge = col.querySelector('h3 .count');
+    if (badge) badge.textContent = n;
   });
 }
 
