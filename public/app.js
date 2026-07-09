@@ -662,6 +662,7 @@ function switchTab(tab) {
   if (view) view.classList.remove('hidden');
 
   if (tab === 'dashboard') renderDashboard();
+  else if (tab === 'conversations') renderConversations();
   else if (tab === 'pipeline') renderPipeline();
   else if (tab === 'contacts') renderContacts();
   else if (tab === 'tasks') loadAndRenderTasks();
@@ -676,6 +677,161 @@ function money(n) {
   n = Number(n) || 0;
   if (Math.abs(n) >= 1000) return '$' + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
   return '$' + Math.round(n).toLocaleString();
+}
+
+/* ------------------------------ Conversations ------------------------------ */
+
+/** Short timestamp: time if today, else M/D. */
+function fmtShort(ts) {
+  try {
+    const d = new Date(ts), now = new Date();
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  } catch (e) { return ''; }
+}
+
+function renderConversations() {
+  const root = $('#view-conversations');
+  if (!root) return;
+  if (!state.convSub) state.convSub = 'texts';
+  root.innerHTML = '<div class="dash"><div class="gcard conv">' +
+    '<div class="conv-h"><div class="conv-tabs">' +
+    '<button data-cs="texts" class="' + (state.convSub === 'texts' ? 'active' : '') + '">Texts</button>' +
+    '<button data-cs="calls" class="' + (state.convSub === 'calls' ? 'active' : '') + '">Calls</button>' +
+    '</div><div class="conv-actions">' +
+    '<button class="gpill" id="convNewCall">📞 New call</button>' +
+    '<button class="gpill" id="convNewText">✉ New text</button>' +
+    '</div></div>' +
+    '<div class="conv-body"><div class="conv-list" id="convList"><p class="ghint">Loading…</p></div>' +
+    '<div class="conv-detail" id="convDetail"><div class="conv-empty">No conversation selected</div></div></div>' +
+    '</div></div>';
+  $all('.conv-tabs button', root).forEach(function (b) {
+    b.addEventListener('click', function () { state.convSub = b.getAttribute('data-cs'); state.convThread = null; renderConversations(); });
+  });
+  $('#convNewCall').addEventListener('click', function () { openDialer('call'); });
+  $('#convNewText').addEventListener('click', function () { openDialer('text'); });
+  loadConversationFeed();
+}
+
+async function loadConversationFeed() {
+  try { state.convFeed = await api('GET', '/contacts/feed/conversations') || []; }
+  catch (e) { state.convFeed = []; }
+  renderConvList();
+}
+
+function renderConvList() {
+  const box = $('#convList');
+  if (!box) return;
+  const feed = state.convFeed || [];
+  if (state.convSub === 'texts') {
+    const threads = {};
+    feed.filter(function (a) { return a.type === 'sms'; }).forEach(function (a) {
+      const k = a.contact_id;
+      if (!threads[k]) threads[k] = { id: k, name: a.contactName, phone: a.contactPhone, last: a, unread: 0 };
+      if (a.direction === 'inbound' && !a.read_at) threads[k].unread++;
+      if (a.created_at > threads[k].last.created_at) threads[k].last = a;
+    });
+    const list = Object.keys(threads).map(function (k) { return threads[k]; }).sort(function (x, y) { return x.last.created_at < y.last.created_at ? 1 : -1; });
+    if (!list.length) { box.innerHTML = '<p class="ghint">No text conversations yet.</p>'; return; }
+    box.innerHTML = list.map(function (t) {
+      return '<div class="conv-item' + (String(state.convThread) === String(t.id) ? ' active' : '') + '" data-thread="' + escAttr(t.id) + '">' +
+        '<div class="conv-av">' + esc((t.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
+        '<div class="conv-meta"><div class="conv-top"><span class="conv-name">' + esc(t.name || t.phone || 'Unknown') + '</span><span class="conv-time">' + esc(fmtShort(t.last.created_at)) + '</span></div>' +
+        '<div class="conv-snip">' + esc((t.last.body || '').slice(0, 44)) + (t.unread ? ' <span class="conv-badge">' + t.unread + '</span>' : '') + '</div></div></div>';
+    }).join('');
+    $all('.conv-item', box).forEach(function (el) {
+      el.addEventListener('click', function () { state.convThread = el.getAttribute('data-thread'); renderConvList(); openTextThread(state.convThread); });
+    });
+  } else {
+    const calls = feed.filter(function (a) { return a.type === 'call' || a.type === 'rvm'; });
+    if (!calls.length) { box.innerHTML = '<div class="conv-empty">📞<br>Nothing to see here<br><span class="ghint">Calls you make or receive appear here</span></div>'; return; }
+    box.innerHTML = calls.map(function (a) {
+      const dir = a.direction === 'inbound' ? '↓ In' : '↑ Out';
+      const vm = a.type === 'rvm' ? ' · Voicemail' : '';
+      return '<div class="conv-item" data-cid="' + escAttr(a.contact_id) + '">' +
+        '<div class="conv-av">' + esc((a.contactName || '?').slice(0, 1).toUpperCase()) + '</div>' +
+        '<div class="conv-meta"><div class="conv-top"><span class="conv-name">' + esc(a.contactName || a.contactPhone || 'Unknown') + '</span><span class="conv-time">' + esc(fmtShort(a.created_at)) + '</span></div>' +
+        '<div class="conv-snip">' + dir + vm + (a.duration_sec ? ' · ' + fmtDur(a.duration_sec) : '') + '</div></div></div>';
+    }).join('');
+    $all('.conv-item', box).forEach(function (el) {
+      el.addEventListener('click', function () { openCallDetail(el.getAttribute('data-cid')); });
+    });
+  }
+}
+
+function openTextThread(cid) {
+  const det = $('#convDetail');
+  if (!det) return;
+  const feed = state.convFeed || [];
+  const items = feed.filter(function (a) { return a.type === 'sms' && String(a.contact_id) === String(cid); }).slice().sort(function (x, y) { return x.created_at < y.created_at ? -1 : 1; });
+  const c = (state.contacts || []).find(function (x) { return String(x.id) === String(cid); }) || (items[0] ? { name: items[0].contactName, phone: items[0].contactPhone } : {});
+  det.innerHTML = '<div class="conv-thead"><b>' + esc(c.name || c.phone || 'Conversation') + '</b> <span class="ghint">' + esc(c.phone || '') + '</span>' +
+    '<button class="gpill" id="convOpenContact">Open contact</button></div>' +
+    '<div class="conv-msgs" id="convMsgs">' + items.map(function (a) {
+      return '<div class="cmsg ' + (a.direction === 'inbound' ? 'in' : 'out') + '"><div class="cbub">' + esc(a.body || '') + '</div><div class="ctime">' + esc(fmtShort(a.created_at)) + '</div></div>';
+    }).join('') + (items.length ? '' : '<p class="ghint">No messages.</p>') + '</div>' +
+    '<div class="conv-reply"><textarea id="convReplyBody" placeholder="Type a message..."></textarea><button class="btn" id="convSend">Send</button></div>';
+  const msgs = $('#convMsgs'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  const oc = $('#convOpenContact'); if (oc) oc.addEventListener('click', function () { const full = (state.contacts || []).find(function (x) { return String(x.id) === String(cid); }); if (full) openContactModal(full); });
+  const send = $('#convSend'); if (send) send.addEventListener('click', async function () {
+    const ok = await sendContactSms(cid, c.phone, $('#convReplyBody').value, send);
+    if (ok) { await loadConversationFeed(); openTextThread(cid); }
+  });
+  items.filter(function (a) { return a.direction === 'inbound' && !a.read_at; }).forEach(function (a) {
+    api('POST', '/activities/' + encodeURIComponent(a.id) + '/read', { read: true }).catch(function () {});
+  });
+}
+
+function openCallDetail(cid) {
+  const det = $('#convDetail');
+  if (!det) return;
+  const c = (state.contacts || []).find(function (x) { return String(x.id) === String(cid); });
+  const feed = state.convFeed || [];
+  const calls = feed.filter(function (a) { return (a.type === 'call' || a.type === 'rvm') && String(a.contact_id) === String(cid); }).slice().sort(function (x, y) { return x.created_at < y.created_at ? 1 : -1; });
+  const name = c ? c.name : (calls[0] ? calls[0].contactName : 'Unknown');
+  const phone = c ? c.phone : (calls[0] ? calls[0].contactPhone : '');
+  det.innerHTML = '<div class="conv-thead"><b>' + esc(name || phone || 'Call') + '</b> <span class="ghint">' + esc(phone || '') + '</span>' +
+    (c ? '<button class="gpill" id="convOpenContact">Open contact</button>' : '') + '</div>' +
+    '<div class="conv-actions2">' + (phone ? '<button class="btn" id="convCall">📞 Call</button><button class="btn blue" id="convText2">✉ Text</button>' : '<span class="ghint">No phone number.</span>') + '</div>' +
+    '<div class="conv-msgs">' + calls.map(function (a) {
+      const vm = a.type === 'rvm' ? 'Voicemail' : (a.direction === 'inbound' ? 'Inbound call' : 'Outbound call');
+      const play = (a.type === 'rvm' && a.provider_id) ? ' <button class="gpill" data-vm="' + escAttr(a.provider_id) + '">▶ Play</button>' : '';
+      return '<div class="clog"><b>' + esc(fmtTimestamp(a.created_at)) + '</b> — ' + vm + (a.duration_sec ? ' · ' + fmtDur(a.duration_sec) : '') + play + (a.body ? '<div class="ghint">' + esc(a.body) + '</div>' : '') + '</div>';
+    }).join('') + '</div>';
+  const oc = $('#convOpenContact'); if (oc && c) oc.addEventListener('click', function () { openContactModal(c); });
+  const cc = $('#convCall'); if (cc) cc.addEventListener('click', function () { placeCall(phone, cid, name); });
+  const ct = $('#convText2'); if (ct) ct.addEventListener('click', function () { state.convSub = 'texts'; state.convThread = cid; renderConversations(); setTimeout(function () { openTextThread(cid); }, 60); });
+  $all('[data-vm]', det).forEach(function (b) { b.addEventListener('click', function () { playRecording(b.getAttribute('data-vm')); }); });
+}
+
+/** Global call/text launcher — reachable anywhere; auto-matches an existing lead. */
+function openDialer(mode) {
+  const body = '<div class="mbody"><div class="field"><label>Phone number</label>' +
+    '<input id="dialNum" type="tel" placeholder="(555) 123-4567"></div>' +
+    (mode === 'text' ? '<div class="field"><label>Message</label><textarea id="dialMsg" rows="3" placeholder="Type a message..."></textarea></div>' : '') +
+    '<div class="err" id="dialErr"></div>' +
+    '<p class="hint">If the number matches an existing lead, the ' + (mode === 'text' ? 'text' : 'call') + ' is logged to that lead automatically.</p></div>' +
+    '<div class="mfoot"><button class="btn ghost" id="dialCancel">Cancel</button>' +
+    '<button class="btn blue" id="dialGo">' + (mode === 'text' ? 'Send text' : 'Call') + '</button></div>';
+  openModal(mode === 'text' ? 'New text' : 'New call', body, {});
+  $('#dialCancel').addEventListener('click', closeModal);
+  $('#dialGo').addEventListener('click', async function () {
+    const num = ($('#dialNum').value || '').trim();
+    const err = $('#dialErr'); err.textContent = '';
+    if (!num) { err.textContent = 'Enter a phone number.'; return; }
+    const lead = findContactByNumberLocal(num);
+    if (mode === 'call') {
+      closeModal();
+      placeCall(num, lead ? lead.id : null, lead ? (lead.name || num) : num);
+      if (lead) toast('Calling ' + (lead.name || num) + ' — logging to their lead', 'ok');
+    } else {
+      const msg = ($('#dialMsg').value || '').trim();
+      if (!msg) { err.textContent = 'Type a message.'; return; }
+      if (!lead) { err.textContent = 'This number isn’t a lead yet. Add it as a lead first so the text can be logged.'; return; }
+      const ok = await sendContactSms(lead.id, lead.phone || num, msg, $('#dialGo'));
+      if (ok) { closeModal(); state.tab = 'conversations'; switchTab('conversations'); setTimeout(function () { state.convSub = 'texts'; state.convThread = lead.id; renderConversations(); setTimeout(function () { openTextThread(lead.id); }, 80); }, 60); }
+    }
+  });
 }
 
 // Shades of red used across the dashboard charts.
