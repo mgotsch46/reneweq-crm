@@ -51,6 +51,21 @@ router.post('/account/password', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Time zone (per user) — used for timed-task reminders + the 4pm review job.
+// ---------------------------------------------------------------------------
+
+/** POST /api/account/timezone {timezone} — IANA name, e.g. America/New_York. */
+router.post('/account/timezone', (req, res) => {
+  const tz = String((req.body || {}).timezone || '').trim();
+  if (!tz) return res.status(400).json({ error: 'timezone is required' });
+  // Validate against the runtime's tz database.
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); }
+  catch (e) { return res.status(400).json({ error: 'Unknown time zone' }); }
+  db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(tz, req.user.id);
+  res.json({ ok: true, timezone: tz });
+});
+
+// ---------------------------------------------------------------------------
 // Two-factor authentication (TOTP)
 // ---------------------------------------------------------------------------
 
