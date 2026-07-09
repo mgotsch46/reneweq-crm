@@ -4,13 +4,13 @@
   --text:#fdeef0; --muted:#d6a9b2;
   --accent:#ef4444; --accent2:#fb7185;             /* shades of red */
   --warn:#fbbf24; --danger:#f87171; --chip:#f43f5e;
-  --line:rgba(255,255,255,.14); --line-soft:rgba(255,255,255,.08);
-  --panel:#160c11; --panel2:#1e1016;               /* solid fallbacks (near-black maroon) */
-  --surface:rgba(20,12,16,.94);                    /* panel fallback (no blur) */
-  --surface-lite:rgba(255,255,255,.05);
+  --line:rgba(255,255,255,.2); --line-soft:rgba(255,255,255,.12);
+  --panel:#241620; --panel2:#301b26;               /* solid fallbacks (raised maroon) */
+  --surface:rgba(42,26,34,.96);                    /* panel fallback (no blur) — lifts off black */
+  --surface-lite:rgba(255,255,255,.07);
   --radius:18px; --radius-sm:12px;
-  --sheen:inset 0 1px 0 rgba(255,255,255,.10);
-  --shadow:0 14px 36px rgba(20,4,10,.5);
+  --sheen:inset 0 1px 0 rgba(255,255,255,.14);
+  --shadow:0 18px 46px rgba(0,0,0,.6);
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -22,11 +22,11 @@ body{
 body::before{
   content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
-    radial-gradient(640px 460px at 12% 6%, rgba(190,18,60,.28), transparent 62%),
-    radial-gradient(760px 540px at 88% 16%, rgba(239,68,68,.16), transparent 62%),
-    radial-gradient(680px 560px at 72% 94%, rgba(127,29,29,.24), transparent 62%),
-    radial-gradient(500px 400px at 22% 82%, rgba(244,63,94,.12), transparent 62%),
-    linear-gradient(160deg,#120409 0%,#000000 55%,#0d0407 100%);
+    radial-gradient(700px 520px at 12% 6%, rgba(225,29,72,.42), transparent 60%),
+    radial-gradient(820px 600px at 88% 14%, rgba(239,68,68,.30), transparent 60%),
+    radial-gradient(760px 620px at 74% 96%, rgba(159,18,57,.38), transparent 60%),
+    radial-gradient(560px 460px at 20% 84%, rgba(244,63,94,.22), transparent 62%),
+    linear-gradient(160deg,#1a060d 0%,#050103 55%,#120509 100%);
 }
 h1,h2,h3,h4{letter-spacing:-.02em}
 button{cursor:pointer;font-family:inherit}
@@ -102,7 +102,8 @@ a{color:var(--accent2)}
 #app{min-height:100vh}
 header.topbar{
   display:flex;align-items:center;gap:16px;padding:12px 20px;
-  background:rgba(8,4,6,.94);border-bottom:1px solid var(--line-soft);
+  background:linear-gradient(180deg,rgba(46,10,20,.96) 0%,rgba(14,5,9,.97) 55%,rgba(4,2,4,.98) 100%);
+  border-bottom:1px solid var(--line-soft);
   box-shadow:var(--sheen),0 8px 24px rgba(0,0,0,.5);
   position:sticky;top:0;z-index:20;flex-wrap:wrap;
 }
@@ -116,7 +117,8 @@ header.topbar{
     border-bottom:none; border-right:1px solid var(--line-soft);
     box-shadow:8px 0 24px rgba(20,4,10,.4),var(--sheen);
   }
-  header.topbar .logo{ margin-bottom:8px; font-size:20px; }
+  header.topbar .logo{ margin-bottom:10px; padding-bottom:12px; font-size:21px; border-bottom:1px solid rgba(239,68,68,.28); width:100%; }
+  header.topbar .who{ color:#f2cdd4; }
   header.topbar nav.tabs{ flex-direction:column; gap:6px; width:100%; }
   header.topbar nav.tabs button{ width:100%; text-align:left; padding:10px 14px; }
   header.topbar .spacer{ flex:1 1 auto; }
@@ -129,15 +131,19 @@ header.topbar{
 .logo span{color:var(--text)}
 nav.tabs{display:flex;gap:6px;flex-wrap:wrap}
 nav.tabs button{
-  background:transparent;border:1px solid transparent;color:var(--muted);
-  padding:8px 15px;border-radius:999px;font-weight:600;transition:color .15s,background .15s,border-color .15s;
+  background:transparent;border:1px solid transparent;color:#f2cdd4;
+  padding:8px 15px;border-radius:12px;font-weight:600;letter-spacing:.2px;
+  transition:color .15s,background .15s,border-color .15s,box-shadow .15s;
 }
-nav.tabs button:hover{color:var(--text);background:rgba(255,255,255,.05)}
+nav.tabs button:hover{color:#fff;background:rgba(239,68,68,.14);border-color:rgba(239,68,68,.28)}
+/* Active page: BLACK background with RED lettering + a red accent bar & glow. */
 nav.tabs button.active{
-  background:linear-gradient(180deg,rgba(239,68,68,.28),rgba(159,18,57,.18));
-  color:#fff;border-color:rgba(251,113,133,.5);
-  box-shadow:var(--sheen);
+  background:#050203;
+  color:#ff3b47;font-weight:800;
+  border-color:rgba(239,68,68,.6);
+  box-shadow:inset 3px 0 0 #ef4444, 0 0 16px rgba(239,68,68,.28);
 }
+nav.tabs button.active:hover{color:#ff5763;background:#050203}
 .spacer{flex:1}
 .who{color:var(--muted);font-size:13px;text-align:right;line-height:1.4}
 .who b{color:var(--text)}
@@ -405,12 +411,14 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 /* ---------- Liquid glass: frosted blur where supported ---------- */
 @supports ((backdrop-filter:blur(4px)) or (-webkit-backdrop-filter:blur(4px))){
   .card,.col,.tablewrap,.modal,.panelbox,.taskform{
-    background:rgba(148,163,211,.09);
-    -webkit-backdrop-filter:blur(18px) saturate(150%);
-    backdrop-filter:blur(18px) saturate(150%);
+    background:linear-gradient(180deg,rgba(255,236,241,.11),rgba(255,236,241,.05));
+    border-color:rgba(255,255,255,.16);
+    -webkit-backdrop-filter:blur(20px) saturate(165%);
+    backdrop-filter:blur(20px) saturate(165%);
+    box-shadow:var(--sheen),0 18px 46px rgba(0,0,0,.6),0 0 0 1px rgba(239,68,68,.12);
   }
   header.topbar{
-    background:rgba(38,14,22,.62);
+    background:linear-gradient(180deg,rgba(60,12,26,.72) 0%,rgba(16,6,10,.78) 55%,rgba(6,2,4,.82) 100%);
     -webkit-backdrop-filter:blur(18px) saturate(150%);
     backdrop-filter:blur(18px) saturate(150%);
   }
