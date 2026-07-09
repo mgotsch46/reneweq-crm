@@ -125,6 +125,18 @@ router.get('/', (req, res) => {
   }
 
   const qp = req.query || {};
+
+  // ADMIN LEAD VIEW: admins see everyone by default, but can narrow the view.
+  //   ?owner=<userId>  → only that user's leads
+  //   ?mine=true       → only the admin's own leads
+  // (Non-admins are already hard-scoped to themselves above; these are ignored.)
+  if (isAdmin(req.user)) {
+    if (qp.mine === 'true' || qp.mine === '1') {
+      where.push('c.owner_id = ?'); params.push(req.user.id);
+    } else if (qp.owner) {
+      where.push('c.owner_id = ?'); params.push(String(qp.owner));
+    }
+  }
   if (qp.q) {
     const raw = String(qp.q);
     const like = '%' + raw + '%';

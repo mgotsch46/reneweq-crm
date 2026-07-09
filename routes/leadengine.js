@@ -594,8 +594,13 @@ router.post('/settings', (req, res) => {
   if ('importOwnerId' in body) {
     const v = String(body.importOwnerId || '').trim();
     if (v) {
-      const target = db.prepare('SELECT id FROM users WHERE id = ?').get(v);
+      // Daily auto-import may ONLY feed an admin's pool — reps get their leads
+      // by uploading their own CSV instead.
+      const target = db.prepare("SELECT id, role FROM users WHERE id = ?").get(v);
       if (!target) return res.status(400).json({ error: 'importOwnerId does not exist' });
+      if (target.role !== 'admin') {
+        return res.status(400).json({ error: 'The daily auto-import can only be assigned to an admin' });
+      }
       setSetting('import_owner_id', target.id);
     } else {
       setSetting('import_owner_id', null);
@@ -604,6 +609,58 @@ router.post('/settings', (req, res) => {
 
   scheduler.reschedule(); // apply the new schedule live
   res.json(settingsPayload());
+});
+
+// --------------------------- Per-user CSV upload ---------------------------
+
+// Canonical template columns (friendly headers that HEADER_MAP recognizes),
+// with one example row so users know exactly what to paste in each column.
+const TEMPLATE_HEADERS = [
+  'Address', 'City', 'State', 'Zip', 'Listing Price', 'Beds', 'Baths', 'Sq Ft',
+  'Property Type', 'Days on Market', 'Listing Date', 'Listing Agent',
+  'Agent Phone', 'Agent Email', 'Brokerage', 'FSBO', 'Keyword Found',
+  'Source', 'Listing URL', 'ZPID', 'Notes',
+];
+const TEMPLATE_EXAMPLE = [
+  '123 Maple St', 'Dallas', 'TX', '75201', '285000', '3', '2', '1650',
+  'Single Family', '84', '2026-05-01', 'Jane Agent', '555-201-3344',
+  'jane@brokerage.com', 'Acme Realty', 'No', 'motivated seller',
+  'Zillow', 'https://www.zillow.com/homedetails/123-Maple-St', '', 'Vacant, needs work',
+];
+
+function csvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n\r]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s;
+}
+
+/** GET /api/leadengine/template.csv — downloadable blank template + example. */
+router.get('/template.csv', (req, res) => {
+  const csv = TEMPLATE_HEADERS.map(csvCell).join(',') + '\r\n' +
+              TEMPLATE_EXAMPLE.map(csvCell).join(',') + '\r\n';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="Deal-Flow-Pro-lead-template.csv"');
+  res.send(csv);
+});
+
+/**
+ * POST /api/leadengine/upload {csvText} — import a user's OWN CSV of leads.
+ * Available to every user; leads are always assigned to the uploader (never
+ * anyone else) and are visible only to that user and the admin. Does NOT touch
+ * the global daily-import settings.
+ */
+router.post('/upload', async (req, res) => {
+  const csvText = (req.body || {}).csvText;
+  if (!csvText || !String(csvText).trim()) {
+    return res.status(400).json({ error: 'Paste CSV text or upload a .csv file first' });
+  }
+  try {
+    const out = await syncFromCsv({ csvText: String(csvText), ownerId: req.user.id });
+    res.json(out);
+  } catch (e) {
+    res.status(e.statusCode || 500).json({
+      error: (e.statusCode ? '' : 'Import failed: ') + (e && e.message ? e.message : String(e)),
+    });
+  }
 });
 
 module.exports = router;

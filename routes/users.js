@@ -6,20 +6,34 @@
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { db, uid, now } = require('../db');
+const { db, uid, now, encryptSecret, decryptSecret } = require('../db');
 
 const router = express.Router();
 
-/** GET /api/users — all users with contact & open-task counts (no hashes). */
+/**
+ * GET /api/users — all users with contact & open-task counts.
+ * Admin-only route (see server.js), so it also returns each user's
+ * decrypted password (per product decision) and 2FA state. Passwords set
+ * before this feature shipped are unrecoverable (only the bcrypt hash exists);
+ * those show as null and can be reset by the admin to become viewable.
+ */
 router.get('/', (req, res) => {
   const rows = db.prepare(`
     SELECT u.id, u.name, u.email, u.role, u.business_number, u.active, u.created_at,
+           u.password_enc, u.totp_enabled,
            (SELECT COUNT(*) FROM contacts c WHERE c.owner_id = u.id)            AS contact_count,
            (SELECT COUNT(*) FROM tasks t WHERE t.owner_id = u.id AND t.done = 0) AS open_task_count
     FROM users u
     ORDER BY u.created_at ASC
   `).all();
-  res.json(rows);
+  res.json(rows.map((r) => {
+    const { password_enc, ...rest } = r;
+    return {
+      ...rest,
+      totp_enabled: r.totp_enabled ? 1 : 0,
+      password: decryptSecret(password_enc), // null if unknown/legacy
+    };
+  }));
 });
 
 /** POST /api/users {name,email,password,role} */
@@ -41,18 +55,19 @@ router.post('/', (req, res) => {
     name: String(name).trim(),
     email: normEmail,
     password_hash: bcrypt.hashSync(String(password), 10),
+    password_enc: encryptSecret(String(password)),
     role: role || 'user',
     business_number: (req.body || {}).business_number || null,
     active: 1,
     created_at: now(),
   };
   db.prepare(`
-    INSERT INTO users (id, name, email, password_hash, role, business_number, active, created_at)
-    VALUES (@id, @name, @email, @password_hash, @role, @business_number, @active, @created_at)
+    INSERT INTO users (id, name, email, password_hash, password_enc, role, business_number, active, created_at)
+    VALUES (@id, @name, @email, @password_hash, @password_enc, @role, @business_number, @active, @created_at)
   `).run(user);
 
-  const { password_hash, ...pub } = user; // never return the hash
-  res.status(201).json(pub);
+  const { password_hash, password_enc, ...pub } = user; // never return the hash
+  res.status(201).json({ ...pub, password: String(password) });
 });
 
 /** PATCH /api/users/:id {role?, active?, name?, business_number?} */
@@ -83,6 +98,8 @@ router.patch('/:id', (req, res) => {
   if ('password' in body && body.password) {
     sets.push('password_hash = @password_hash');
     params.password_hash = bcrypt.hashSync(String(body.password), 10);
+    sets.push('password_enc = @password_enc');
+    params.password_enc = encryptSecret(String(body.password));
   }
   if ('business_number' in body) {
     sets.push('business_number = @business_number');
@@ -100,6 +117,18 @@ router.patch('/:id', (req, res) => {
     'SELECT id, name, email, role, business_number, active, created_at FROM users WHERE id = ?'
   ).get(target.id);
   res.json(updated);
+});
+
+/**
+ * POST /api/users/:id/2fa-reset — clear a user's 2FA (e.g. they lost their
+ * phone). They'll be able to log in with just their password, and (if admin)
+ * will be prompted to re-enroll.
+ */
+router.post('/:id/2fa-reset', (req, res) => {
+  const target = db.prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(target.id);
+  res.json({ ok: true, id: target.id, totp_enabled: 0 });
 });
 
 /**

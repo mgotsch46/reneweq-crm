@@ -77,32 +77,32 @@ router.get('/rvm/status', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Inbound voicemail GREETING (what callers hear). Org-wide (shared number),
-// admin-managed: a typed greeting (spoken by the system) and/or a recorded
-// voice greeting that plays to callers.
+// Inbound voicemail GREETING (what callers hear). PER-USER: each user manages
+// their OWN greeting (typed text spoken by the system and/or a recorded clip),
+// stored on their users row. When an inbound call routes to a given user, that
+// user's greeting is what the caller hears; it is never shared with other users.
 // ---------------------------------------------------------------------------
 
-/** GET /api/settings/vm-greeting — current greeting config. */
+/** GET /api/settings/vm-greeting — the requesting user's own greeting config. */
 router.get('/settings/vm-greeting', requireAuth, (req, res) => {
-  const recId = getSetting('vm_greeting_recording_id') || null;
+  const u = db.prepare('SELECT vm_greeting_text, vm_greeting_recording_id FROM users WHERE id = ?').get(req.user.id) || {};
+  const recId = u.vm_greeting_recording_id || null;
   res.json({
-    text: getSetting('vm_greeting_text') || '',
+    text: u.vm_greeting_text || '',
     recordingId: recId,
     hasAudio: !!recId,
   });
 });
 
-/** POST /api/settings/vm-greeting {text} — save the spoken greeting text. */
+/** POST /api/settings/vm-greeting {text} — save the user's spoken greeting text. */
 router.post('/settings/vm-greeting', requireAuth, (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
   const text = (req.body && req.body.text != null) ? String(req.body.text).slice(0, 500) : '';
-  setSetting('vm_greeting_text', text);
+  db.prepare('UPDATE users SET vm_greeting_text = ? WHERE id = ?').run(text, req.user.id);
   res.json({ ok: true, text });
 });
 
-/** POST /api/settings/vm-greeting/recording {mime, dataBase64} — record/upload a voice greeting. */
+/** POST /api/settings/vm-greeting/recording {mime, dataBase64} — record/upload the user's voice greeting. */
 router.post('/settings/vm-greeting/recording', requireAuth, (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
   const { mime, dataBase64, duration_ms } = req.body || {};
   if (!dataBase64) return res.status(400).json({ error: 'dataBase64 is required' });
   let buf;
@@ -111,8 +111,9 @@ router.post('/settings/vm-greeting/recording', requireAuth, (req, res) => {
   if (!buf.length) return res.status(400).json({ error: 'Empty recording' });
   if (buf.length > MAX_BYTES) return res.status(413).json({ error: 'Recording too large (max 10 MB)' });
 
-  // Remove any previous greeting recording (file + row).
-  const oldId = getSetting('vm_greeting_recording_id');
+  // Remove this user's previous greeting recording (file + row).
+  const prev = db.prepare('SELECT vm_greeting_recording_id FROM users WHERE id = ?').get(req.user.id) || {};
+  const oldId = prev.vm_greeting_recording_id;
   if (oldId) {
     const old = db.prepare('SELECT stored FROM rvm_recordings WHERE id = ?').get(oldId);
     if (old) { try { fs.unlinkSync(path.join(RVM_DIR, old.stored)); } catch (e) {} }
@@ -129,20 +130,20 @@ router.post('/settings/vm-greeting/recording', requireAuth, (req, res) => {
     id, owner_id: req.user.id, stored, mime: mime ? String(mime).slice(0, 80) : 'audio/wav',
     size: buf.length, dur: Number(duration_ms) || null, created_at: now(),
   });
-  setSetting('vm_greeting_recording_id', id);
+  db.prepare('UPDATE users SET vm_greeting_recording_id = ? WHERE id = ?').run(id, req.user.id);
   res.status(201).json({ ok: true, recordingId: id });
 });
 
-/** DELETE /api/settings/vm-greeting/recording — remove the voice greeting. */
+/** DELETE /api/settings/vm-greeting/recording — remove the user's voice greeting. */
 router.delete('/settings/vm-greeting/recording', requireAuth, (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admin only' });
-  const oldId = getSetting('vm_greeting_recording_id');
+  const prev = db.prepare('SELECT vm_greeting_recording_id FROM users WHERE id = ?').get(req.user.id) || {};
+  const oldId = prev.vm_greeting_recording_id;
   if (oldId) {
     const old = db.prepare('SELECT stored FROM rvm_recordings WHERE id = ?').get(oldId);
     if (old) { try { fs.unlinkSync(path.join(RVM_DIR, old.stored)); } catch (e) {} }
     try { db.prepare('DELETE FROM rvm_recordings WHERE id = ?').run(oldId); } catch (e) {}
   }
-  setSetting('vm_greeting_recording_id', '');
+  db.prepare('UPDATE users SET vm_greeting_recording_id = NULL WHERE id = ?').run(req.user.id);
   res.json({ ok: true });
 });
 

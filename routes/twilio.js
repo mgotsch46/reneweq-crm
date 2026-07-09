@@ -183,26 +183,35 @@ router.post('/voice-inbound', (req, res) => {
   }
   if (!targetUserId) {
     // No agent to ring → go straight to voicemail.
-    return res.send(voicemailTwiml());
+    return res.send(voicemailTwiml(null));
   }
   const identity = xmlEscape(identityFor(targetUserId));
   // Ring the browser client; if it isn't answered, `action` drops to voicemail.
+  // Pass the rung user's id so the fallback plays THAT user's greeting.
+  const fbAction = '/api/twilio/voice-inbound-fallback?u=' + encodeURIComponent(targetUserId);
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    `<Response><Dial answerOnBridge="true" timeout="25" action="/api/twilio/voice-inbound-fallback" method="POST"><Client>${identity}</Client></Dial></Response>`
+    `<Response><Dial answerOnBridge="true" timeout="25" action="${xmlEscape(fbAction)}" method="POST"><Client>${identity}</Client></Dial></Response>`
   );
 });
 
-/** TwiML that greets the caller (custom recording or text) and records a voicemail. */
-function voicemailTwiml() {
+/**
+ * TwiML that greets the caller (custom recording or text) and records a
+ * voicemail. Uses the greeting belonging to `userId` (the user the call routed
+ * to); falls back to a generic message if that user hasn't set one.
+ */
+function voicemailTwiml(userId) {
   let greeting;
-  const recId = getSetting('vm_greeting_recording_id');
+  const u = userId
+    ? db.prepare('SELECT vm_greeting_text, vm_greeting_recording_id FROM users WHERE id = ?').get(userId)
+    : null;
+  const recId = u && u.vm_greeting_recording_id;
   if (recId) {
     const base = (process.env.APP_BASE_URL || 'https://reneweq-crm-production.up.railway.app').replace(/\/+$/, '');
     greeting = '<Play>' + xmlEscape(base + '/api/rvm/recordings/' + recId + '/public') + '</Play>';
   } else {
-    const text = getSetting('vm_greeting_text') ||
-      "You've reached RenewEQ. Please leave a message after the tone, then hang up.";
+    const text = (u && u.vm_greeting_text) ||
+      "You've reached Deal Flow Pro. Please leave a message after the tone, then hang up.";
     greeting = '<Say voice="alice">' + xmlEscape(text) + '</Say>';
   }
   return '<?xml version="1.0" encoding="UTF-8"?><Response>' +
@@ -225,7 +234,8 @@ router.post('/voice-inbound-fallback', (req, res) => {
     // Call was answered — nothing more to do.
     return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   }
-  res.send(voicemailTwiml());
+  const uid = (req.query && req.query.u) || (req.body && req.body.u) || null;
+  res.send(voicemailTwiml(uid));
 });
 
 /**
