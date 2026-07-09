@@ -204,6 +204,34 @@ router.get('/', (req, res) => {
   res.json(rows.map(parseContact));
 });
 
+/**
+ * GET /api/contacts/feed/conversations — unified inbox feed of texts + calls
+ * across the requester's contacts (admin sees all), newest first, each row
+ * carrying the contact's name/phone/property so the UI can build threads.
+ *   ?kind=sms  → texts only    ?kind=call → calls + voicemails only
+ */
+router.get('/feed/conversations', (req, res) => {
+  const s = ownerScope(req.user, 'c');
+  const where = [];
+  const params = [];
+  if (s.where) { where.push(s.where.replace(/^WHERE\s+/, '')); params.push(...s.params); }
+  const kind = (req.query || {}).kind;
+  if (kind === 'sms') { where.push("a.type = 'sms'"); }
+  else if (kind === 'call') { where.push("a.type IN ('call','rvm')"); }
+  else { where.push("a.type IN ('sms','call','rvm','email')"); }
+  const rows = db.prepare(`
+    SELECT a.id, a.contact_id, a.type, a.direction, a.mode, a.body, a.status,
+           a.provider_id, a.duration_sec, a.read_at, a.created_at, a.created_by,
+           c.name AS contactName, c.phone AS contactPhone, c.property AS contactProperty,
+           c.stage AS contactStage
+    FROM activities a JOIN contacts c ON c.id = a.contact_id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY a.created_at DESC
+    LIMIT 1000
+  `).all(...params);
+  res.json(rows);
+});
+
 /** Build a full contact row object from a request body (all columns present). */
 function buildContact(body, ownerId) {
   const ts = now();
