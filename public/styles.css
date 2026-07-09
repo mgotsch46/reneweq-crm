@@ -224,6 +224,16 @@ tr:last-child td{border-bottom:none}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
 .sec{margin-top:22px}
 .sec h4{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);border-bottom:1px solid var(--line-soft);padding-bottom:6px;font-weight:700}
+/* Contact modal: shade each section into its own card so the long form reads
+   as distinct blocks (Details, Property, Dates, Communication, Documents...). */
+.modal .sec{
+  margin-top:16px; padding:16px 18px; border-radius:14px;
+  background:rgba(225,29,72,.05); border:1px solid var(--line-soft);
+  border-left:3px solid rgba(225,29,72,.55);
+  box-shadow:var(--sheen);
+}
+.modal .sec h4{ margin-top:0; color:#fda4af; border-bottom-color:rgba(225,29,72,.25); }
+.modal .adminbar{ border-radius:14px; }
 .close{background:transparent;border:none;color:var(--muted);font-size:22px;line-height:1}
 .close:hover{color:var(--text)}
 .actions-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
