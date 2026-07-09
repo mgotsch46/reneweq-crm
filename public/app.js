@@ -678,6 +678,53 @@ function money(n) {
   return '$' + Math.round(n).toLocaleString();
 }
 
+// Shades of red used across the dashboard charts.
+var RED_SHADES = ['#e11d48', '#f43f5e', '#fb7185', '#be123c', '#9f1239', '#fda4af', '#f87171', '#dc2626', '#881337', '#ef4444', '#b91c1c', '#fecdd3', '#7f1d1d'];
+
+/** Donut chart SVG. segments:[{value,color}], big center text + optional sub. */
+function donutSVG(segments, center, sub) {
+  var total = segments.reduce(function (a, s) { return a + (s.value || 0); }, 0);
+  var r = 52, cx = 70, cy = 70, sw = 15, circ = 2 * Math.PI * r, off = 0, arcs = '';
+  if (total <= 0) {
+    arcs = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#eceef2" stroke-width="' + sw + '"/>';
+  } else {
+    segments.forEach(function (s) {
+      var v = s.value || 0; if (v <= 0) return;
+      var len = (v / total) * circ, gap = total > 1 ? 2.5 : 0, draw = Math.max(0.5, len - gap);
+      arcs += '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + s.color + '" stroke-width="' + sw +
+        '" stroke-dasharray="' + draw + ' ' + (circ - draw) + '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>';
+      off += len;
+    });
+  }
+  return '<svg viewBox="0 0 140 140" width="150" height="150" class="donut">' + arcs +
+    '<text x="' + cx + '" y="' + (cy - (sub ? 6 : 0)) + '" text-anchor="middle" dominant-baseline="central" font-size="30" font-weight="800" fill="#243043">' + esc(String(center)) + '</text>' +
+    (sub ? '<text x="' + cx + '" y="' + (cy + 16) + '" text-anchor="middle" font-size="11" fill="#94a3b8">' + esc(sub) + '</text>' : '') +
+    '</svg>';
+}
+
+/** Single-value gauge ring (conversion rate). */
+function gaugeSVG(pct, center) {
+  var r = 52, cx = 70, cy = 70, sw = 14, circ = 2 * Math.PI * r, len = (Math.max(0, Math.min(100, pct)) / 100) * circ;
+  return '<svg viewBox="0 0 140 140" width="150" height="150" class="donut">' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#f3e1e5" stroke-width="' + sw + '"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#e11d48" stroke-width="' + sw + '" stroke-linecap="round" stroke-dasharray="' + len + ' ' + (circ - len) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>' +
+    '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="26" font-weight="800" fill="#243043">' + esc(String(center)) + '</text>' +
+    '</svg>';
+}
+
+/** GoHighLevel-style white card wrapper. */
+function gcard(title, body, extraClass) {
+  return '<div class="gcard' + (extraClass ? ' ' + extraClass : '') + '">' +
+    '<div class="gcard-h"><h3>' + esc(title) + '</h3><span class="gpill">All pipelines</span></div>' +
+    '<div class="gcard-b">' + body + '</div></div>';
+}
+
+/** One legend line: swatch + label + value. */
+function legLine(color, label, valueText) {
+  return '<div class="gleg"><span class="gsw" style="background:' + color + '"></span>' +
+    '<span class="glab">' + esc(label) + '</span>' + (valueText ? '<span class="gval">' + valueText + '</span>' : '') + '</div>';
+}
+
 function renderDashboard() {
   const root = $('#view-dashboard');
   if (!root) return;
@@ -734,75 +781,117 @@ function renderDashboard() {
   const dueToday = openTasks.filter(function (t) { return String(t.due_date).slice(0, 10) <= todayStr; });
   const dueWeek = openTasks.filter(function (t) { const d = String(t.due_date).slice(0, 10); return d > todayStr && d <= weekEndStr; });
 
-  // ---- KPI cards
-  const kpi = function (label, value, sub) {
-    return '<div class="kpi"><div class="kpi-l">' + esc(label) + '</div>' +
-      '<div class="kpi-v">' + value + '</div>' + (sub ? '<div class="kpi-s">' + sub + '</div>' : '') + '</div>';
-  };
-  let html = '<div class="viewhead"><h2>Dashboard</h2><span class="hint">Running last 30 days &middot; live from your pipeline</span></div>';
-  html += '<div class="kpirow">' +
-    kpi('Revenue opportunity', money(oppValue), active.length + ' active deals') +
-    kpi('Won revenue', money(wonRevenue), wonList.length + ' closed') +
-    kpi('Conversion rate', convRate + '%', 'closed / entered') +
-    kpi('New leads (30d)', String(newLeads30), 'added this period') +
-    kpi('Dead deals', String(dead.length), 'archived') +
-    '</div>';
-
-  // ---- Pipeline status bar graph
-  const maxCount = Math.max(1, Math.max.apply(null, funnel.map(function (s) { return countByStage[s]; })));
-  html += '<div class="panelbox" style="max-width:none"><h3>Pipeline status</h3>' +
-    '<p class="hint" style="margin:2px 0 14px">Active deals by stage</p>';
-  funnel.forEach(function (s) {
-    const c = countByStage[s]; const pct = Math.round((c / maxCount) * 100);
-    html += '<div class="barrow"><div class="barlbl">' + esc(s) + '</div>' +
-      '<div class="bartrack"><div class="barfill" style="width:' + pct + '%"></div></div>' +
-      '<div class="barnum">' + c + '<span class="barval">' + money(valByStage[s]) + '</span></div></div>';
+  // ---- Status buckets (Open / Abandoned / Won)
+  const WON_STAGES = ['Assigned', 'Closed'];
+  const wonD = active.filter(function (c) { return WON_STAGES.indexOf(c.stage) !== -1; });
+  const openD = active.filter(function (c) { return WON_STAGES.indexOf(c.stage) === -1; });
+  const openVal = openD.reduce(function (a, c) { return a + val(c); }, 0);
+  const wonVal = wonD.reduce(function (a, c) { return a + val(c); }, 0);
+  const deadVal = dead.reduce(function (a, c) { return a + val(c); }, 0);
+  const totalDeals = openD.length + wonD.length + dead.length;
+  const totalRev = openVal + wonVal + deadVal;
+  const conv = totalDeals ? Math.round((wonD.length / totalDeals) * 100) : 0;
+  const cumVal = funnel.map(function (s, i) {
+    return active.filter(function (c) { return idxOf(c.stage) >= i; }).reduce(function (a, c) { return a + val(c); }, 0);
   });
-  html += '</div>';
 
-  // ---- Sales funnel (conversion)
-  html += '<div class="panelbox" style="max-width:none"><h3>Sales funnel</h3>' +
-    '<p class="hint" style="margin:2px 0 14px">Cumulative deals reaching each stage, with step conversion</p>' +
-    '<div class="tablewrap"><table><thead><tr><th>Stage</th><th>Deals</th><th>Cumulative %</th><th>Next-step conversion</th></tr></thead><tbody>';
+  function taskDuePill(due) {
+    const d = new Date(String(due).slice(0, 10) + 'T00:00:00');
+    const t = new Date(); t.setHours(0, 0, 0, 0);
+    const diff = Math.round((d - t) / 864e5);
+    const ds = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
+    if (diff < 0) return '<span class="gdue overdue">Overdue - ' + ds + '</span>';
+    if (diff === 0) return '<span class="gdue">Due today - ' + ds + '</span>';
+    if (diff === 1) return '<span class="gdue">Due in 1 day - ' + ds + '</span>';
+    return '<span class="gdue">Due in ' + diff + ' days - ' + ds + '</span>';
+  }
+  function taskOwnerName(t) {
+    const u = (state.users || []).find(function (x) { return String(x.id) === String(t.owner_id); });
+    if (u) return u.name;
+    if (state.user && String(t.owner_id) === String(state.user.id)) return state.user.name;
+    return 'Unassigned';
+  }
+
+  let html = '<div class="dash">';
+
+  // ---- Row 1: Opportunity status / value / conversion
+  const statusSegs = [
+    { value: openD.length, color: '#e11d48' },
+    { value: dead.length, color: '#fda4af' },
+    { value: wonD.length, color: '#9f1239' },
+  ];
+  const statusBody = '<div class="gsplit"><div class="gchart">' + donutSVG(statusSegs, totalDeals) + '</div>' +
+    '<div class="glegs">' +
+    legLine('#e11d48', 'Open - ' + openD.length) +
+    legLine('#fda4af', 'Abandoned - ' + dead.length) +
+    legLine('#9f1239', 'Won - ' + wonD.length) +
+    '</div></div>';
+
+  const maxV = Math.max(1, wonVal, deadVal, openVal);
+  const ovBar = function (label, v, color) {
+    return '<div class="ovrow"><div class="ovlbl">' + label + '</div>' +
+      '<div class="ovtrack"><div class="ovfill" style="width:' + Math.round((v / maxV) * 100) + '%;background:' + color + '"></div></div></div>';
+  };
+  const valueBody = '<div class="ovbars">' + ovBar('Won', wonVal, '#9f1239') + ovBar('Abandoned', deadVal, '#fda4af') + ovBar('Open', openVal, '#e11d48') + '</div>' +
+    '<div class="ovtotal">Total revenue<b>' + money(totalRev) + '</b></div>';
+
+  const convBody = '<div class="gchart">' + gaugeSVG(conv, conv + '%') + '</div>' +
+    '<div class="ovtotal">Won revenue<b>' + money(wonVal) + '</b></div>';
+
+  html += '<div class="grow grow3">' + gcard('Opportunity status', statusBody) + gcard('Opportunity value', valueBody) + gcard('Conversion rate', convBody) + '</div>';
+
+  // ---- Row 2: Funnel + Stage distribution
+  let funBody = '<div class="gfun"><div class="gfun-cellh"></div><div class="gfun-cellh">Cumulative</div><div class="gfun-cellh">Next step<br>conversion</div>';
   funnel.forEach(function (s, i) {
     const c = cum[i];
-    const cumPct = top ? Math.round((c / top) * 100) : 0;
-    const nextPct = (i < funnel.length - 1 && c) ? Math.round((cum[i + 1] / c) * 100) : (i === funnel.length - 1 ? null : 0);
-    const barPct = top ? Math.round((c / top) * 100) : 0;
-    html += '<tr><td><div class="funnelcell"><span>' + esc(s) + '</span>' +
-      '<div class="funbar" style="width:' + barPct + '%"></div></div></td>' +
-      '<td>' + c + '</td><td>' + cumPct + '%</td>' +
-      '<td>' + (nextPct === null ? '—' : nextPct + '%') + '</td></tr>';
+    const cumTxt = (top ? (c / top * 100) : 0).toFixed(2) + '%';
+    const nextTxt = (i === funnel.length - 1) ? '—' : (c ? (cum[i + 1] / c * 100).toFixed(2) + '%' : '0.00%');
+    const w = Math.max(16, top ? Math.round((c / top) * 100) : 0);
+    funBody += '<div class="gfun-barcell"><div class="gfun-bar" style="width:' + w + '%;background:' + RED_SHADES[i % RED_SHADES.length] + '">' +
+      '<span class="gfb-l">' + esc(s) + '</span><span class="gfb-v">' + money(cumVal[i]) + '</span></div></div>' +
+      '<div class="gfun-cell">' + cumTxt + '</div><div class="gfun-cell">' + nextTxt + '</div>';
   });
-  html += '</tbody></table></div></div>';
+  funBody += '</div>';
 
-  // ---- Lead source report
-  html += '<div class="panelbox" style="max-width:none"><h3>Lead source report</h3>' +
-    '<p class="hint" style="margin:2px 0 14px">Where your leads came from (tag on each contact)</p>' +
-    '<div class="tablewrap"><table><thead><tr><th>Source</th><th>Leads</th><th>Total value</th><th>Won</th><th>Dead</th><th>Win %</th></tr></thead><tbody>';
-  if (!sources.length) html += '<tr><td colspan="6" class="hint">No leads yet.</td></tr>';
+  const distSegs = funnel.map(function (s, i) { return { value: countByStage[s], color: RED_SHADES[i % RED_SHADES.length] }; });
+  distSegs.push({ value: dead.length, color: '#fecdd3' });
+  let distLegs = '';
+  funnel.forEach(function (s, i) {
+    const cnt = countByStage[s]; const pct = totalDeals ? (cnt / totalDeals * 100) : 0;
+    distLegs += legLine(RED_SHADES[i % RED_SHADES.length], s, money(valByStage[s]) + ' (' + pct.toFixed(2) + '%) - ' + cnt);
+  });
+  distLegs += legLine('#fecdd3', 'Lost/abandoned', money(deadVal) + ' (' + (totalDeals ? (dead.length / totalDeals * 100).toFixed(2) : '0.00') + '%) - ' + dead.length);
+  const distBody = '<div class="gsplit"><div class="gchart">' + donutSVG(distSegs, totalDeals) + '</div><div class="glegs glegs-scroll">' + distLegs + '</div></div>';
+
+  html += '<div class="grow grow-fn">' + gcard('Funnel', funBody, 'gcard-wide') + gcard('Stage distribution', distBody) + '</div>';
+
+  // ---- Row 3: Tasks (single list, GHL style)
+  const sortedTasks = openTasks.slice().sort(function (a, b) {
+    return String(a.due_date).slice(0, 10) < String(b.due_date).slice(0, 10) ? -1 : 1;
+  });
+  const taskRow = function (t) {
+    const c = (state.contacts || []).find(function (x) { return String(x.id) === String(t.contact_id); });
+    const who = c ? (c.name || c.property || '') : '';
+    return '<div class="gtask"><input type="checkbox" disabled>' +
+      '<div class="gtask-b"><div class="gtask-t">' + esc(t.title || 'Task') + ' ' + taskDuePill(t.due_date) + '</div>' +
+      '<div class="gtask-s">' + (who ? esc(who) + ' &nbsp; ' : '') + 'Assigned to: ' + esc(taskOwnerName(t)) + '</div></div></div>';
+  };
+  const tasksBody = sortedTasks.length ? sortedTasks.map(taskRow).join('') : '<p class="ghint">No pending tasks. 🎉</p>';
+  html += '<div class="grow"><div class="gcard"><div class="gcard-h"><h3>Tasks</h3><span class="gpill">Pending</span></div>' +
+    '<div class="gcard-b gtasks">' + tasksBody + '</div></div></div>';
+
+  // ---- Row 4: Lead source report
+  let lsRows = '';
+  if (!sources.length) lsRows = '<tr><td colspan="6" class="ghint">No leads yet.</td></tr>';
   sources.forEach(function (r) {
     const winPct = r.count ? Math.round((r.won / r.count) * 100) : 0;
-    html += '<tr><td><span class="tag blue">' + esc(r.source) + '</span></td>' +
-      '<td>' + r.count + '</td><td>' + money(r.value) + '</td><td>' + r.won + '</td><td>' + r.dead + '</td><td>' + winPct + '%</td></tr>';
+    lsRows += '<tr><td><span class="gtag">' + esc(r.source) + '</span></td><td>' + r.count + '</td><td>' + money(r.value) + '</td><td>' + r.won + '</td><td>' + r.dead + '</td><td>' + winPct + '%</td></tr>';
   });
-  html += '</tbody></table></div></div>';
+  html += '<div class="grow"><div class="gcard"><div class="gcard-h"><h3>Lead source report</h3><span class="gpill">All pipelines</span></div>' +
+    '<div class="gcard-b"><table class="gtable"><thead><tr><th>Source</th><th>Leads</th><th>Total value</th><th>Won</th><th>Dead</th><th>Win %</th></tr></thead><tbody>' +
+    lsRows + '</tbody></table></div></div></div>';
 
-  // ---- Tasks today / this week
-  const taskItem = function (t) {
-    const c = (state.contacts || []).find(function (x) { return String(x.id) === String(t.contact_id); });
-    const who = c ? ' · ' + esc(c.property || c.name || '') : '';
-    const overdue = String(t.due_date).slice(0, 10) < todayStr;
-    return '<div class="dtask"><span class="' + (overdue ? 'due overdue' : 'due') + '">' + esc(fmtDate(t.due_date)) + '</span> ' +
-      esc(t.title || 'Task') + '<span class="hint">' + who + '</span></div>';
-  };
-  html += '<div class="grid2" style="align-items:start">' +
-    '<div class="panelbox" style="max-width:none"><h3>Tasks — today &amp; overdue <span class="count">' + dueToday.length + '</span></h3>' +
-    (dueToday.length ? dueToday.map(taskItem).join('') : '<p class="hint">Nothing due today. 🎉</p>') + '</div>' +
-    '<div class="panelbox" style="max-width:none"><h3>Tasks — this week <span class="count">' + dueWeek.length + '</span></h3>' +
-    (dueWeek.length ? dueWeek.map(taskItem).join('') : '<p class="hint">Nothing scheduled this week.</p>') + '</div>' +
-    '</div>';
-
+  html += '</div>';
   root.innerHTML = html;
 }
 
