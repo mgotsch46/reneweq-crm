@@ -19,16 +19,37 @@ const bcrypt = require('bcryptjs');
 
 /** Pipeline stages, in exact order. */
 const STAGES = [
-  'Prospect',
-  'Offer Delivered',
+  'New',
+  'Contacted',
+  'Qualified',
+  'Offer Sent',
+  'Negotiation',
   'Offer Accepted',
-  'Property Analyzer Run',
+  'Property Analyzer',
   'BOG Walk Through',
   'EMD Sent',
   'Dispo',
   'Assigned',
   'Closed',
+  'Dead Deal',
 ];
+
+/** Reasons a deal died (Dead Deal stage → archived). */
+const DEAD_REASONS = ['Did not accept offer', 'Sold', 'Other'];
+
+/** Lead-source tags. Custom sources are also allowed (free text). */
+const LEAD_SOURCES = ['Manual Upload', 'Zillow', 'Referral', 'Email Campaign', 'Custom'];
+
+/**
+ * Map legacy stage names → new stage names (applied once at boot so existing
+ * leads land on the closest new stage).
+ */
+const STAGE_REMAP = {
+  'Prospect': 'New',
+  'Offer Delivered': 'Offer Sent',
+  'Property Analyzer Run': 'Property Analyzer',
+  // Offer Accepted, BOG Walk Through, EMD Sent, Dispo, Assigned, Closed keep their names.
+};
 
 /** Default 4-touch SMS drip templates. Tokens: {name} {property} {agent} */
 const DEFAULT_TEXTS = [
@@ -103,7 +124,7 @@ CREATE TABLE IF NOT EXISTS contacts (
   agentName         TEXT,
   agentPhone        TEXT,
   agentEmail        TEXT,
-  stage             TEXT NOT NULL DEFAULT 'Prospect',
+  stage             TEXT NOT NULL DEFAULT 'New',
   notes             TEXT,
   executedContract  TEXT,
   closing           TEXT,
@@ -421,6 +442,47 @@ const GOOGLE_TASK_COLUMNS = [
 }
 
 // ---------------------------------------------------------------------------
+// Idempotent migration — wholesale workflow columns on `contacts`:
+//   wholesale_fee       — estimated assignment fee ($)
+//   lead_source         — tag for where the lead came from (Manual Upload,
+//                         Zillow, or a custom value)
+//   offerAcceptedDate   — auto-filled when the stage moves to "Offer Accepted"
+//   archived            — 1 = filed away (Dead Deal) and hidden from active views
+//   dead_reason         — Did not accept offer | Sold | Other
+//   dead_notes          — free-text notes for a dead/archived deal
+// ---------------------------------------------------------------------------
+
+const WHOLESALE_COLUMNS = [
+  ['wholesale_fee', 'REAL'],
+  ['lead_source', 'TEXT'],
+  ['offerAcceptedDate', 'TEXT'],
+  ['archived', 'INTEGER NOT NULL DEFAULT 0'],
+  ['dead_reason', 'TEXT'],
+  ['dead_notes', 'TEXT'],
+];
+
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(contacts)').all().map((col) => col.name)
+  );
+  for (const [name, type] of WHOLESALE_COLUMNS) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE contacts ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+// One-time stage remap: move any legacy stage names to the new set.
+{
+  const upd = db.prepare('UPDATE contacts SET stage = ? WHERE stage = ?');
+  for (const [oldName, newName] of Object.entries(STAGE_REMAP)) {
+    try { upd.run(newName, oldName); } catch (e) { /* ignore */ }
+  }
+  // Any contact currently on the "Dead Deal" stage should also be archived.
+  try { db.exec("UPDATE contacts SET archived = 1 WHERE stage = 'Dead Deal'"); } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent migration — per-user security & account columns.
 //   password_enc          — AES-encrypted copy of the password so an admin can
 //                           reveal it (per product decision). Login still uses
@@ -606,7 +668,7 @@ function seed() {
       agentName: null,
       agentPhone: null,
       agentEmail: null,
-      stage: 'Offer Delivered',
+      stage: 'Offer Sent',
       notes: 'Motivated seller — relocating for work.',
       source: 'Zillow',
       texts: JSON.stringify(DEFAULT_TEXTS),
@@ -650,7 +712,7 @@ function seed() {
       agentName: 'Bill Broker',
       agentPhone: '555-300-1188',
       agentEmail: 'bill.broker@example.com',
-      stage: 'Prospect',
+      stage: 'New',
       notes: 'FSBO listing — reached out via listing phone number.',
       source: 'Zillow',
       texts: JSON.stringify(DEFAULT_TEXTS),
@@ -669,6 +731,6 @@ seed();
 // ---------------------------------------------------------------------------
 
 module.exports = {
-  db, uid, now, DATA_DIR, STAGES, DEFAULT_TEXTS, DEFAULT_RVM,
+  db, uid, now, DATA_DIR, STAGES, DEAD_REASONS, LEAD_SOURCES, DEFAULT_TEXTS, DEFAULT_RVM,
   getSetting, setSetting, encryptSecret, decryptSecret,
 };

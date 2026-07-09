@@ -16,7 +16,7 @@ const cors = require('cors');
 
 const { requireAuth, requireAdmin } = require('./auth');
 const { messagingMode } = require('./integrations');
-const { STAGES, DEFAULT_TEXTS, DEFAULT_RVM } = require('./db');
+const { STAGES, DEAD_REASONS, LEAD_SOURCES, DEFAULT_TEXTS, DEFAULT_RVM } = require('./db');
 
 const authRoutes = require('./routes/auth');
 const contactRoutes = require('./routes/contacts');
@@ -53,6 +53,8 @@ app.get('/api/config', requireAuth, (req, res) => {
   res.json({
     messagingMode: messagingMode(), // 'live' only if Twilio env vars present
     stages: STAGES,
+    deadReasons: DEAD_REASONS,
+    leadSources: LEAD_SOURCES,
     defaultTexts: DEFAULT_TEXTS,
     defaultRvm: DEFAULT_RVM,
   });
