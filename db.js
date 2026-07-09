@@ -224,6 +224,19 @@ CREATE INDEX IF NOT EXISTS idx_schedrvm_due ON scheduled_rvms(status, send_at);
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 `);
 
+// Native (Android/iOS) push tokens — Firebase Cloud Messaging registration
+// tokens, one row per device. Separate from web-push subscriptions above.
+db.exec(`
+CREATE TABLE IF NOT EXISTS native_push_tokens (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  token      TEXT NOT NULL UNIQUE,
+  platform   TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_native_push_user ON native_push_tokens(user_id);
+`);
+
 // ---------------------------------------------------------------------------
 // Idempotent migration — add real-estate lead columns to `contacts`.
 // Fresh installs get them via CREATE TABLE above; existing DBs get ALTERed
