@@ -3808,6 +3808,9 @@ function renderSettings() {
     '  <button type="button" class="btn small" id="vmGreetSaveRec" disabled>Save recording</button>' +
     '</div>' +
     '<div id="vmGreetCurrent" class="doclist"></div>' +
+    '<h3 style="margin-top:18px">My phone number (texts &amp; calls)</h3>' +
+    '<p class="hint">Pick your own number so your texts and calls go out from it, and replies come back to you. Numbers are bought by your admin in Twilio; choose an available one below and it’s set up automatically.</p>' +
+    '<div id="myNumberBox"><p class="hint">Loading your number…</p></div>' +
     '<h3 style="margin-top:18px">Google Tasks &amp; Calendar</h3>' +
     '<div id="googleBox"><p class="hint">Checking Google status…</p></div>' +
     '<h3 style="margin-top:18px">Microsoft To Do &amp; Outlook Calendar</h3>' +
@@ -3844,6 +3847,92 @@ function renderSettings() {
   wirePasswordChange();    // self-service password change
   refreshTwoFactorSection(); // 2FA status + enable/disable controls
   wireTimezone();          // per-user time zone
+  renderMyNumberBox();     // per-user sending number (self-claim)
+}
+
+/** Settings → render + wire the per-user sending-number picker. */
+async function renderMyNumberBox() {
+  const box = $('#myNumberBox');
+  if (!box) return;
+  let data;
+  try { data = await api('GET', '/twilio/numbers'); }
+  catch (e) {
+    box.innerHTML = '<p class="hint">Phone numbers aren’t available yet — your Twilio account isn’t connected on the server, or it returned: ' + esc(e.message || 'error') + '</p>';
+    return;
+  }
+  const nums = data.numbers || [];
+  const mine = data.myNumber || null;
+  const isAdmin = state.user && state.user.role === 'admin';
+
+  let html = '';
+  if (mine) {
+    html += '<div class="kv"><b>Your number:</b> <span class="tag ok">' + esc(fmtPhone(mine)) + '</span> ' +
+      '<button class="btn ghost small" id="numRelease">Release</button></div>' +
+      '<p class="hint">Your texts and calls send from this number, and inbound replies come to you.</p>';
+  } else {
+    const avail = nums.filter(function (n) { return !n.claimedBy; });
+    if (!nums.length) {
+      html += '<p class="hint">There are no numbers in your Twilio account yet. Your admin buys one in Twilio, then it appears here.</p>';
+    } else if (!avail.length) {
+      html += '<p class="hint">All numbers are currently claimed. Ask your admin to add another number in Twilio.</p>';
+    } else {
+      html += '<div class="actions-row"><select class="search sm" id="numPick" style="min-width:200px">' +
+        avail.map(function (n) { return '<option value="' + escAttr(n.phoneNumber) + '">' + esc(fmtPhone(n.phoneNumber)) + '</option>'; }).join('') +
+        '</select><button class="btn small" id="numClaim">Use this number</button><span class="hint" id="numMsg"></span></div>';
+    }
+  }
+
+  // Admin: show the whole pool and who owns each, with release controls.
+  if (isAdmin && nums.length) {
+    html += '<div style="margin-top:14px"><b style="font-size:13px">All account numbers</b>' +
+      '<table class="gtable" style="margin-top:6px"><thead><tr><th>Number</th><th>Assigned to</th><th></th></tr></thead><tbody>' +
+      nums.map(function (n) {
+        const who = n.claimedBy ? esc(n.claimedBy.name) : '<span class="hint">— available —</span>';
+        const rel = n.claimedBy ? '<button class="btn ghost small numRel" data-uid="' + escAttr(n.claimedBy.id) + '">Release</button>' : '';
+        return '<tr><td>' + esc(fmtPhone(n.phoneNumber)) + '</td><td>' + who + '</td><td>' + rel + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>';
+  }
+
+  box.innerHTML = html;
+
+  const claimBtn = $('#numClaim');
+  if (claimBtn) claimBtn.addEventListener('click', async function () {
+    const pick = $('#numPick'); const msg = $('#numMsg');
+    if (!pick || !pick.value) return;
+    msg.textContent = ''; claimBtn.disabled = true; claimBtn.textContent = 'Setting up…';
+    try {
+      await api('POST', '/twilio/numbers/claim', { phoneNumber: pick.value });
+      toast('Number is yours — texts and calls now use it', 'ok');
+      await refreshTwilioStatus();
+      renderMyNumberBox();
+    } catch (e) { msg.textContent = e.message; claimBtn.disabled = false; claimBtn.textContent = 'Use this number'; }
+  });
+
+  const relBtn = $('#numRelease');
+  if (relBtn) relBtn.addEventListener('click', async function () {
+    if (!confirm('Release your number? Your texts and calls will fall back to the shared number until you pick another.')) return;
+    relBtn.disabled = true;
+    try { await api('POST', '/twilio/numbers/release', {}); toast('Number released', 'ok'); await refreshTwilioStatus(); renderMyNumberBox(); }
+    catch (e) { toast(e.message, 'error'); relBtn.disabled = false; }
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.numRel'), function (b) {
+    b.addEventListener('click', async function () {
+      if (!confirm('Release this number from this user?')) return;
+      b.disabled = true;
+      try { await api('POST', '/twilio/numbers/release', { userId: b.getAttribute('data-uid') }); toast('Released', 'ok'); renderMyNumberBox(); }
+      catch (e) { toast(e.message, 'error'); b.disabled = false; }
+    });
+  });
+}
+
+/** Pretty-print an E.164 US number like +19415551234 → (941) 555-1234. */
+function fmtPhone(p) {
+  const d = String(p || '').replace(/[^0-9]/g, '');
+  const t = d.length === 11 && d[0] === '1' ? d.slice(1) : d;
+  if (t.length === 10) return '(' + t.slice(0, 3) + ') ' + t.slice(3, 6) + '-' + t.slice(6);
+  return String(p || '');
 }
 
 /** Settings → save the user's time zone. */
