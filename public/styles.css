@@ -514,6 +514,34 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
   .callbtn{ width:34px; height:34px; }
 }
 
+/* ---------- Dashboard ---------- */
+.kpirow{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:18px; }
+@media(max-width:1100px){ .kpirow{ grid-template-columns:repeat(2,1fr); } }
+@media(max-width:560px){ .kpirow{ grid-template-columns:1fr; } }
+.kpi{
+  background:var(--surface); border:1px solid var(--line-soft); border-radius:16px;
+  padding:16px 18px; box-shadow:var(--sheen),var(--shadow);
+  border-top:3px solid #e11d48;
+}
+.kpi-l{ font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); font-weight:700; }
+.kpi-v{ font-size:26px; font-weight:800; margin:6px 0 2px; color:var(--text); }
+.kpi-s{ font-size:12px; color:var(--muted); }
+
+.barrow{ display:flex; align-items:center; gap:12px; margin:8px 0; }
+.barlbl{ width:150px; flex:0 0 150px; font-size:13px; color:var(--text); text-align:right; }
+.bartrack{ flex:1; height:22px; background:rgba(255,255,255,.06); border-radius:8px; overflow:hidden; border:1px solid var(--line-soft); }
+.barfill{ height:100%; border-radius:8px 0 0 8px; background:linear-gradient(90deg,#7f1d1d,#ef4444); transition:width .4s ease; min-width:2px; }
+.barnum{ width:120px; flex:0 0 120px; font-weight:800; font-size:14px; }
+.barnum .barval{ display:block; font-weight:600; font-size:11px; color:var(--muted); }
+
+.funnelcell{ position:relative; display:flex; align-items:center; min-height:22px; }
+.funnelcell span{ position:relative; z-index:2; font-size:13px; }
+.funbar{ position:absolute; left:0; top:0; bottom:0; border-radius:6px; background:linear-gradient(90deg,rgba(225,29,72,.35),rgba(239,68,68,.18)); z-index:1; transition:width .4s ease; }
+
+.dtask{ padding:8px 0; border-bottom:1px dashed var(--line-soft); font-size:14px; }
+.dtask:last-child{ border-bottom:none; }
+.panelbox h3 .count{ background:rgba(225,29,72,.18); border:1px solid rgba(225,29,72,.4); color:#fda4af; border-radius:999px; padding:1px 9px; font-size:12px; margin-left:6px; }
+
 /* ---------- Deal Flow Pro brand ---------- */
 .brand-lockup{ display:flex; align-items:center; justify-content:center; gap:12px; margin:0 0 2px; }
 .brand-lockup h1{ margin:0; font-size:24px; font-weight:800; color:var(--text); }

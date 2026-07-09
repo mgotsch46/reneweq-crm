@@ -317,7 +317,8 @@ async function bootApp() {
   if (isAdmin()) { await refreshUsers().catch(function () {}); }
 
   await refreshContacts().catch(toastErr);
-  switchTab('pipeline');
+  await refreshTasks().catch(function () {});
+  switchTab('dashboard');
 
   // If this admin still owes 2FA setup (required for their role), prompt now.
   if (state.force2faSetup) { state.force2faSetup = false; openTwoFactorSetup(true); }
@@ -660,12 +661,154 @@ function switchTab(tab) {
   const view = $('#view-' + tab);
   if (view) view.classList.remove('hidden');
 
-  if (tab === 'pipeline') renderPipeline();
+  if (tab === 'dashboard') renderDashboard();
+  else if (tab === 'pipeline') renderPipeline();
   else if (tab === 'contacts') renderContacts();
   else if (tab === 'tasks') loadAndRenderTasks();
   else if (tab === 'team') loadAndRenderTeam();
   else if (tab === 'leadengine') renderLeadEngine();
   else if (tab === 'settings') renderSettings();
+}
+
+/* ------------------------------ Dashboard ------------------------------ */
+
+function money(n) {
+  n = Number(n) || 0;
+  if (Math.abs(n) >= 1000) return '$' + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return '$' + Math.round(n).toLocaleString();
+}
+
+function renderDashboard() {
+  const root = $('#view-dashboard');
+  if (!root) return;
+  const all = state.contacts || [];
+  const active = all.filter(function (c) { return !truthy(c.archived); });
+  const dead = all.filter(function (c) { return truthy(c.archived); });
+  const funnel = STAGES.filter(function (s) { return s !== DEAD_STAGE; });
+  const idxOf = function (s) { var i = funnel.indexOf(s || funnel[0]); return i < 0 ? 0 : i; };
+  const val = function (c) {
+    var w = (c.wholesale_fee !== null && c.wholesale_fee !== undefined && c.wholesale_fee !== '') ? Number(c.wholesale_fee) : null;
+    if (w && Number.isFinite(w)) return w;
+    var p = Number(c.price) || 0;
+    return p;
+  };
+
+  // Per-stage active counts + value
+  const countByStage = {}; const valByStage = {};
+  funnel.forEach(function (s) { countByStage[s] = 0; valByStage[s] = 0; });
+  active.forEach(function (c) { const s = c.stage || funnel[0]; if (countByStage[s] != null) { countByStage[s]++; valByStage[s] += val(c); } });
+
+  // Cumulative funnel (reached this stage OR later) for proper conversion rates
+  const cum = funnel.map(function (s, i) { return active.filter(function (c) { return idxOf(c.stage) >= i; }).length; });
+  const top = cum[0] || 0;
+
+  const wonList = active.filter(function (c) { return c.stage === 'Closed'; });
+  const wonRevenue = wonList.reduce(function (a, c) { return a + val(c); }, 0);
+  const oppValue = active.reduce(function (a, c) { return a + val(c); }, 0);
+  const convRate = top ? Math.round((wonList.length / top) * 100) : 0;
+
+  // Running 30 days: new leads added
+  const cutoff = Date.now() - 30 * 864e5;
+  const newLeads30 = active.filter(function (c) {
+    const d = new Date(c.imported_at || c.created_at || 0).getTime();
+    return d >= cutoff;
+  }).length;
+
+  // Lead-source report
+  const srcMap = {};
+  function srcKey(c) { return c.lead_source || c.source || 'Unknown'; }
+  active.forEach(function (c) {
+    const k = srcKey(c);
+    if (!srcMap[k]) srcMap[k] = { source: k, count: 0, value: 0, won: 0, dead: 0 };
+    srcMap[k].count++; srcMap[k].value += val(c);
+    if (c.stage === 'Closed') srcMap[k].won++;
+  });
+  dead.forEach(function (c) { const k = srcKey(c); if (!srcMap[k]) srcMap[k] = { source: k, count: 0, value: 0, won: 0, dead: 0 }; srcMap[k].dead++; });
+  const sources = Object.keys(srcMap).map(function (k) { return srcMap[k]; }).sort(function (a, b) { return b.count - a.count; });
+
+  // Tasks: today (incl. overdue) + this week
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const todayStr = fmtISODate(t0);
+  const weekEndStr = fmtISODate(new Date(t0.getTime() + 7 * 864e5));
+  const openTasks = (state.tasks || []).filter(function (t) { return !truthy(t.done) && t.due_date; });
+  const dueToday = openTasks.filter(function (t) { return String(t.due_date).slice(0, 10) <= todayStr; });
+  const dueWeek = openTasks.filter(function (t) { const d = String(t.due_date).slice(0, 10); return d > todayStr && d <= weekEndStr; });
+
+  // ---- KPI cards
+  const kpi = function (label, value, sub) {
+    return '<div class="kpi"><div class="kpi-l">' + esc(label) + '</div>' +
+      '<div class="kpi-v">' + value + '</div>' + (sub ? '<div class="kpi-s">' + sub + '</div>' : '') + '</div>';
+  };
+  let html = '<div class="viewhead"><h2>Dashboard</h2><span class="hint">Running last 30 days &middot; live from your pipeline</span></div>';
+  html += '<div class="kpirow">' +
+    kpi('Revenue opportunity', money(oppValue), active.length + ' active deals') +
+    kpi('Won revenue', money(wonRevenue), wonList.length + ' closed') +
+    kpi('Conversion rate', convRate + '%', 'closed / entered') +
+    kpi('New leads (30d)', String(newLeads30), 'added this period') +
+    kpi('Dead deals', String(dead.length), 'archived') +
+    '</div>';
+
+  // ---- Pipeline status bar graph
+  const maxCount = Math.max(1, Math.max.apply(null, funnel.map(function (s) { return countByStage[s]; })));
+  html += '<div class="panelbox" style="max-width:none"><h3>Pipeline status</h3>' +
+    '<p class="hint" style="margin:2px 0 14px">Active deals by stage</p>';
+  funnel.forEach(function (s) {
+    const c = countByStage[s]; const pct = Math.round((c / maxCount) * 100);
+    html += '<div class="barrow"><div class="barlbl">' + esc(s) + '</div>' +
+      '<div class="bartrack"><div class="barfill" style="width:' + pct + '%"></div></div>' +
+      '<div class="barnum">' + c + '<span class="barval">' + money(valByStage[s]) + '</span></div></div>';
+  });
+  html += '</div>';
+
+  // ---- Sales funnel (conversion)
+  html += '<div class="panelbox" style="max-width:none"><h3>Sales funnel</h3>' +
+    '<p class="hint" style="margin:2px 0 14px">Cumulative deals reaching each stage, with step conversion</p>' +
+    '<div class="tablewrap"><table><thead><tr><th>Stage</th><th>Deals</th><th>Cumulative %</th><th>Next-step conversion</th></tr></thead><tbody>';
+  funnel.forEach(function (s, i) {
+    const c = cum[i];
+    const cumPct = top ? Math.round((c / top) * 100) : 0;
+    const nextPct = (i < funnel.length - 1 && c) ? Math.round((cum[i + 1] / c) * 100) : (i === funnel.length - 1 ? null : 0);
+    const barPct = top ? Math.round((c / top) * 100) : 0;
+    html += '<tr><td><div class="funnelcell"><span>' + esc(s) + '</span>' +
+      '<div class="funbar" style="width:' + barPct + '%"></div></div></td>' +
+      '<td>' + c + '</td><td>' + cumPct + '%</td>' +
+      '<td>' + (nextPct === null ? '—' : nextPct + '%') + '</td></tr>';
+  });
+  html += '</tbody></table></div></div>';
+
+  // ---- Lead source report
+  html += '<div class="panelbox" style="max-width:none"><h3>Lead source report</h3>' +
+    '<p class="hint" style="margin:2px 0 14px">Where your leads came from (tag on each contact)</p>' +
+    '<div class="tablewrap"><table><thead><tr><th>Source</th><th>Leads</th><th>Total value</th><th>Won</th><th>Dead</th><th>Win %</th></tr></thead><tbody>';
+  if (!sources.length) html += '<tr><td colspan="6" class="hint">No leads yet.</td></tr>';
+  sources.forEach(function (r) {
+    const winPct = r.count ? Math.round((r.won / r.count) * 100) : 0;
+    html += '<tr><td><span class="tag blue">' + esc(r.source) + '</span></td>' +
+      '<td>' + r.count + '</td><td>' + money(r.value) + '</td><td>' + r.won + '</td><td>' + r.dead + '</td><td>' + winPct + '%</td></tr>';
+  });
+  html += '</tbody></table></div></div>';
+
+  // ---- Tasks today / this week
+  const taskItem = function (t) {
+    const c = (state.contacts || []).find(function (x) { return String(x.id) === String(t.contact_id); });
+    const who = c ? ' · ' + esc(c.property || c.name || '') : '';
+    const overdue = String(t.due_date).slice(0, 10) < todayStr;
+    return '<div class="dtask"><span class="' + (overdue ? 'due overdue' : 'due') + '">' + esc(fmtDate(t.due_date)) + '</span> ' +
+      esc(t.title || 'Task') + '<span class="hint">' + who + '</span></div>';
+  };
+  html += '<div class="grid2" style="align-items:start">' +
+    '<div class="panelbox" style="max-width:none"><h3>Tasks — today &amp; overdue <span class="count">' + dueToday.length + '</span></h3>' +
+    (dueToday.length ? dueToday.map(taskItem).join('') : '<p class="hint">Nothing due today. 🎉</p>') + '</div>' +
+    '<div class="panelbox" style="max-width:none"><h3>Tasks — this week <span class="count">' + dueWeek.length + '</span></h3>' +
+    (dueWeek.length ? dueWeek.map(taskItem).join('') : '<p class="hint">Nothing scheduled this week.</p>') + '</div>' +
+    '</div>';
+
+  root.innerHTML = html;
+}
+
+/** YYYY-MM-DD from a Date (local). */
+function fmtISODate(d) {
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
 }
 
 /* ------------------------------ Pipeline ------------------------------ */
