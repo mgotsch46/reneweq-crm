@@ -22,11 +22,10 @@ body{
 body::before{
   content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
-    radial-gradient(700px 520px at 12% 6%, rgba(225,29,72,.42), transparent 60%),
-    radial-gradient(820px 600px at 88% 14%, rgba(239,68,68,.30), transparent 60%),
-    radial-gradient(760px 620px at 74% 96%, rgba(159,18,57,.38), transparent 60%),
-    radial-gradient(560px 460px at 20% 84%, rgba(244,63,94,.22), transparent 62%),
-    linear-gradient(160deg,#1a060d 0%,#050103 55%,#120509 100%);
+    radial-gradient(700px 520px at 12% 6%, rgba(190,18,60,.16), transparent 58%),
+    radial-gradient(820px 600px at 88% 14%, rgba(239,68,68,.10), transparent 58%),
+    radial-gradient(760px 620px at 74% 96%, rgba(159,18,57,.14), transparent 58%),
+    linear-gradient(160deg,#0a0206 0%,#020102 58%,#070205 100%);
 }
 h1,h2,h3,h4{letter-spacing:-.02em}
 button{cursor:pointer;font-family:inherit}
@@ -410,7 +409,7 @@ td.chk input,th.chk input{cursor:pointer;accent-color:var(--accent2)}
 
 /* ---------- Liquid glass: frosted blur where supported ---------- */
 @supports ((backdrop-filter:blur(4px)) or (-webkit-backdrop-filter:blur(4px))){
-  .card,.col,.tablewrap,.modal,.panelbox,.taskform{
+  .card,.col,.tablewrap,.modal,.panelbox,.taskform,.gcard,.kpi{
     background:linear-gradient(180deg,rgba(255,236,241,.11),rgba(255,236,241,.05));
     border-color:rgba(255,255,255,.16);
     -webkit-backdrop-filter:blur(20px) saturate(165%);
@@ -651,6 +650,56 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
 .conv-reply textarea{ flex:1; resize:none; height:44px; border:1px solid #e6e9f0; border-radius:10px; padding:10px 12px; font:inherit; font-size:14px; color:#243043; background:#fff; }
 .conv-actions2{ display:flex; gap:8px; padding:14px 18px; border-bottom:1px solid #eef0f4; }
 .clog{ padding:12px 18px; border-bottom:1px solid #f2f4f7; font-size:13px; color:#344054; }
+
+/* ---------- Unify Dashboard + Conversations to the dark glass theme ---------- */
+.dash{ background:transparent; padding:0; margin:0; }
+.gcard{ background:var(--surface); border:1px solid var(--line-soft); box-shadow:var(--sheen),var(--shadow); }
+.gcard-h{ border-bottom:1px solid var(--line-soft); }
+.gcard-h h3{ color:var(--text); }
+.gcard-b{ color:var(--text); }
+.gpill{ background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--muted); }
+.gleg{ color:var(--text); }
+.glab{ color:var(--muted); }
+.gval{ color:var(--muted); }
+.ovlbl{ color:var(--muted); }
+.ovtrack{ background:rgba(255,255,255,.08); }
+.ovtotal{ color:var(--muted); }
+.ovtotal b{ color:var(--text); }
+.gfun-cellh{ color:var(--muted); }
+.gfun-cell{ background:rgba(255,255,255,.05); color:var(--text); }
+.gtable th{ color:var(--muted); border-bottom:1px solid var(--line-soft); }
+.gtable td{ color:var(--text); border-bottom:1px solid var(--line-soft); }
+.gtag{ background:rgba(239,68,68,.15); color:#fda4af; border:1px solid rgba(239,68,68,.4); }
+.ghint{ color:var(--muted); }
+.gtasks .gtask{ border-bottom:1px solid var(--line-soft); }
+.gtask-t{ color:#ff6b78; }
+.gtask-s{ color:var(--muted); }
+.gdue{ background:rgba(255,255,255,.08); color:var(--muted); }
+.gdue.overdue{ background:rgba(239,68,68,.2); color:#fecaca; }
+/* Conversations */
+.conv-h{ border-bottom:1px solid var(--line-soft); }
+.conv-tabs button{ color:var(--muted); }
+.conv-tabs button.active{ color:#ff6b78; background:rgba(239,68,68,.14); }
+.conv-list{ border-right:1px solid var(--line-soft); }
+.conv-item{ border-bottom:1px solid var(--line-soft); }
+.conv-item:hover{ background:rgba(255,255,255,.04); }
+.conv-item.active{ background:rgba(239,68,68,.13); }
+.conv-item.unread{ background:rgba(239,68,68,.08); }
+.conv-item.unread .conv-name{ color:#fff; }
+.conv-item.unread .conv-snip{ color:var(--text); }
+.conv-av{ background:rgba(255,255,255,.08); color:var(--muted); }
+.conv-name{ color:var(--text); }
+.conv-time{ color:var(--muted); }
+.conv-snip{ color:var(--muted); }
+.conv-empty{ color:var(--muted); }
+.conv-thead{ border-bottom:1px solid var(--line-soft); }
+.cmsg.in .cbub{ background:rgba(255,255,255,.09); color:var(--text); }
+.cmsg.out .cbub{ background:#e11d48; color:#fff; }
+.ctime{ color:var(--muted); }
+.conv-reply{ border-top:1px solid var(--line-soft); }
+.conv-reply textarea{ background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+.conv-actions2{ border-bottom:1px solid var(--line-soft); }
+.clog{ border-bottom:1px solid var(--line-soft); color:var(--text); }
 
 /* ---------- Deal Flow Pro brand ---------- */
 .brand-lockup{ display:flex; align-items:center; justify-content:center; gap:12px; margin:0 0 2px; }

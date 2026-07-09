@@ -852,7 +852,7 @@ function donutSVG(segments, center, sub) {
   var total = segments.reduce(function (a, s) { return a + (s.value || 0); }, 0);
   var r = 52, cx = 70, cy = 70, sw = 15, circ = 2 * Math.PI * r, off = 0, arcs = '';
   if (total <= 0) {
-    arcs = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#eceef2" stroke-width="' + sw + '"/>';
+    arcs = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="' + sw + '"/>';
   } else {
     segments.forEach(function (s) {
       var v = s.value || 0; if (v <= 0) return;
@@ -863,8 +863,8 @@ function donutSVG(segments, center, sub) {
     });
   }
   return '<svg viewBox="0 0 140 140" width="150" height="150" class="donut">' + arcs +
-    '<text x="' + cx + '" y="' + (cy - (sub ? 6 : 0)) + '" text-anchor="middle" dominant-baseline="central" font-size="30" font-weight="800" fill="#243043">' + esc(String(center)) + '</text>' +
-    (sub ? '<text x="' + cx + '" y="' + (cy + 16) + '" text-anchor="middle" font-size="11" fill="#94a3b8">' + esc(sub) + '</text>' : '') +
+    '<text x="' + cx + '" y="' + (cy - (sub ? 6 : 0)) + '" text-anchor="middle" dominant-baseline="central" font-size="30" font-weight="800" fill="#fdeef0">' + esc(String(center)) + '</text>' +
+    (sub ? '<text x="' + cx + '" y="' + (cy + 16) + '" text-anchor="middle" font-size="11" fill="#d6a9b2">' + esc(sub) + '</text>' : '') +
     '</svg>';
 }
 
@@ -872,9 +872,9 @@ function donutSVG(segments, center, sub) {
 function gaugeSVG(pct, center) {
   var r = 52, cx = 70, cy = 70, sw = 14, circ = 2 * Math.PI * r, len = (Math.max(0, Math.min(100, pct)) / 100) * circ;
   return '<svg viewBox="0 0 140 140" width="150" height="150" class="donut">' +
-    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#f3e1e5" stroke-width="' + sw + '"/>' +
-    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#e11d48" stroke-width="' + sw + '" stroke-linecap="round" stroke-dasharray="' + len + ' ' + (circ - len) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>' +
-    '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="26" font-weight="800" fill="#243043">' + esc(String(center)) + '</text>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="' + sw + '"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="#ef4444" stroke-width="' + sw + '" stroke-linecap="round" stroke-dasharray="' + len + ' ' + (circ - len) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>' +
+    '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="26" font-weight="800" fill="#fdeef0">' + esc(String(center)) + '</text>' +
     '</svg>';
 }
 
@@ -3930,10 +3930,12 @@ async function openTwoFactorSetup(forced) {
   const body =
     '<div class="mbody">' +
     (forced ? '<div class="banner">Two-factor authentication is required for admin accounts. Please finish setup to continue.</div>' : '') +
-    '<p class="hint">1. Install an authenticator app (Google Authenticator, Authy, 1Password…).<br>' +
-    '2. Scan this QR code, or enter the key manually.<br>' +
-    '3. Type the 6-digit code the app shows to confirm.</p>' +
+    '<p class="hint"><b>1.</b> Install an authenticator app — Google Authenticator, Microsoft Authenticator, or Authy.<br>' +
+    '<b>2.</b> <u>Open that app first</u> and use its <b>+ / Scan a QR code</b> button to scan the code below. ' +
+    'Do <b>not</b> point your phone\'s camera at it — the camera sends it to your saved passwords, not to the authenticator.<br>' +
+    '<b>3.</b> Type the 6-digit code the authenticator shows to confirm.</p>' +
     '<div style="text-align:center;margin:12px 0">' + qrImg + '</div>' +
+    '<p class="hint" style="text-align:center">Can\'t scan? In your authenticator app choose <b>Enter a setup key</b> and type the key below (account name: Deal Flow Pro).</p>' +
     '<div class="kv" style="text-align:center"><b>Manual key:</b> <code>' + esc(data.secret || '') + '</code></div>' +
     '<div class="field" style="max-width:220px;margin:14px auto 0"><label>6-digit code</label>' +
     '<input id="twofaEnableCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></div>' +
