@@ -15,6 +15,15 @@ let STAGES = [
 const DEAD_STAGE = 'Dead Deal';
 let LEAD_SOURCES = ['Manual Upload', 'Zillow', 'Referral', 'Email Campaign', 'Custom'];
 let DEAD_REASONS = ['Did not accept offer', 'Sold', 'Other'];
+const TIMEZONES = [
+  ['America/New_York', 'Eastern (New York)'],
+  ['America/Chicago', 'Central (Chicago)'],
+  ['America/Denver', 'Mountain (Denver)'],
+  ['America/Phoenix', 'Arizona (no DST)'],
+  ['America/Los_Angeles', 'Pacific (Los Angeles)'],
+  ['America/Anchorage', 'Alaska'],
+  ['Pacific/Honolulu', 'Hawaii'],
+];
 
 const TOKEN_KEY = 'crm_token';
 
@@ -734,7 +743,7 @@ function renderConvList() {
     const list = Object.keys(threads).map(function (k) { return threads[k]; }).sort(function (x, y) { return x.last.created_at < y.last.created_at ? 1 : -1; });
     if (!list.length) { box.innerHTML = '<p class="ghint">No text conversations yet.</p>'; return; }
     box.innerHTML = list.map(function (t) {
-      return '<div class="conv-item' + (String(state.convThread) === String(t.id) ? ' active' : '') + '" data-thread="' + escAttr(t.id) + '">' +
+      return '<div class="conv-item' + (t.unread ? ' unread' : '') + (String(state.convThread) === String(t.id) ? ' active' : '') + '" data-thread="' + escAttr(t.id) + '">' +
         '<div class="conv-av">' + esc((t.name || '?').slice(0, 1).toUpperCase()) + '</div>' +
         '<div class="conv-meta"><div class="conv-top"><span class="conv-name">' + esc(t.name || t.phone || 'Unknown') + '</span><span class="conv-time">' + esc(fmtShort(t.last.created_at)) + '</span></div>' +
         '<div class="conv-snip">' + esc((t.last.body || '').slice(0, 44)) + (t.unread ? ' <span class="conv-badge">' + t.unread + '</span>' : '') + '</div></div></div>';
@@ -748,7 +757,8 @@ function renderConvList() {
     box.innerHTML = calls.map(function (a) {
       const dir = a.direction === 'inbound' ? '↓ In' : '↑ Out';
       const vm = a.type === 'rvm' ? ' · Voicemail' : '';
-      return '<div class="conv-item" data-cid="' + escAttr(a.contact_id) + '">' +
+      const isNew = a.direction === 'inbound' && !a.read_at;
+      return '<div class="conv-item' + (isNew ? ' unread' : '') + '" data-cid="' + escAttr(a.contact_id) + '">' +
         '<div class="conv-av">' + esc((a.contactName || '?').slice(0, 1).toUpperCase()) + '</div>' +
         '<div class="conv-meta"><div class="conv-top"><span class="conv-name">' + esc(a.contactName || a.contactPhone || 'Unknown') + '</span><span class="conv-time">' + esc(fmtShort(a.created_at)) + '</span></div>' +
         '<div class="conv-snip">' + dir + vm + (a.duration_sec ? ' · ' + fmtDur(a.duration_sec) : '') + '</div></div></div>';
@@ -2406,6 +2416,15 @@ async function refreshVoicemailBadge() {
       if (n > 0) { b.textContent = '🔔 ' + n + ' new'; b.classList.remove('hidden'); }
       else { b.classList.add('hidden'); }
     }
+    // Conversations menu badge (new texts + calls + voicemails).
+    const navB = document.getElementById('convNavBadge');
+    if (navB) {
+      if (n > 0) { navB.textContent = n > 99 ? '99+' : String(n); navB.classList.remove('hidden'); }
+      else { navB.classList.add('hidden'); }
+    }
+    // If the Conversations view is open, refresh it so new items appear/bold live.
+    if (state.tab === 'conversations' && n !== state._lastConvUnread) loadConversationFeed();
+    state._lastConvUnread = n;
     // Update the installed-app icon badge (Android + iOS 16.4+ installed PWA).
     try { if (navigator.setAppBadge) { n > 0 ? navigator.setAppBadge(n) : navigator.clearAppBadge(); } } catch (e) {}
     // Native app (Capacitor) icon badge.
@@ -3798,6 +3817,12 @@ function renderSettings() {
     '<div class="kv"><b>Signed in as:</b> ' + esc(state.user ? state.user.name : '') + ' (' + esc(state.user ? state.user.email : '') + ')</div>' +
     '<div class="kv"><b>Role:</b> ' + esc(state.user ? state.user.role : '') + '</div>' +
 
+    '<h3 style="margin-top:18px">My time zone</h3>' +
+    '<p class="hint">Used for task reminders and the 4:00 PM end-of-day review.</p>' +
+    '<div class="actions-row"><select class="search sm" id="tzSelect" style="min-width:240px">' +
+    TIMEZONES.map(function (z) { return '<option value="' + escAttr(z[0]) + '"' + (((state.user && state.user.timezone) || 'America/New_York') === z[0] ? ' selected' : '') + '>' + esc(z[1]) + '</option>'; }).join('') +
+    '</select><button class="btn small" id="tzSave">Save</button><span class="hint" id="tzMsg"></span></div>' +
+
     '<h3 style="margin-top:18px">Change my password</h3>' +
     '<p class="hint">Update your own password anytime. You need your current one.</p>' +
     '<div class="grid3">' +
@@ -3818,6 +3843,24 @@ function renderSettings() {
   wireVmGreeting();        // per-user greeting for everyone
   wirePasswordChange();    // self-service password change
   refreshTwoFactorSection(); // 2FA status + enable/disable controls
+  wireTimezone();          // per-user time zone
+}
+
+/** Settings → save the user's time zone. */
+function wireTimezone() {
+  const btn = $('#tzSave');
+  if (!btn) return;
+  btn.addEventListener('click', async function () {
+    const tz = $('#tzSelect').value;
+    const msg = $('#tzMsg'); msg.textContent = '';
+    btn.disabled = true;
+    try {
+      await api('POST', '/account/timezone', { timezone: tz });
+      if (state.user) state.user.timezone = tz;
+      toast('Time zone saved', 'ok');
+    } catch (e) { msg.textContent = e.message; }
+    btn.disabled = false;
+  });
 }
 
 /** Settings → self-service password change. */

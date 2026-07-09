@@ -584,7 +584,19 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
 .gtag{ background:#fdecef; color:#be123c; border:1px solid #fbd0d9; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:600; }
 .ghint{ color:#98a2b3; padding:16px; text-align:center; }
 
+/* Unread count badge on a nav item */
+.navbadge{
+  display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px;
+  padding:0 5px; margin-left:8px; border-radius:999px; background:#e11d48; color:#fff;
+  font-size:11px; font-weight:800; vertical-align:middle;
+}
+
 /* ---------- Conversations (GoHighLevel-style, light) ---------- */
+.conv-item.unread .conv-name{ font-weight:800; color:#111827; }
+.conv-item.unread .conv-snip{ color:#243043; font-weight:700; }
+.conv-item.unread{ background:#fff7f8; }
+.conv-item.unread::before{ content:""; width:8px; height:8px; border-radius:50%; background:#e11d48; position:absolute; left:4px; }
+.conv-item{ position:relative; }
 .conv{ display:flex; flex-direction:column; height:calc(100vh - 90px); min-height:480px; }
 .conv-h{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid #eef0f4; flex:0 0 auto; }
 .conv-tabs{ display:flex; gap:6px; }
