@@ -30,6 +30,69 @@ if (VAPID_PUBLIC && VAPID_PRIVATE) {
 
 function pushConfigured() { return configured; }
 
+// ---------------------------------------------------------------------------
+// Native push (Android/iOS) via Firebase Cloud Messaging.
+// Activates only when FIREBASE_SERVICE_ACCOUNT (the Firebase Admin service
+// account JSON) is present as an env var. Safe no-op otherwise.
+// ---------------------------------------------------------------------------
+let admin = null;
+let fcmReady = false;
+try { admin = require('firebase-admin'); } catch (e) { /* dep not installed yet */ }
+
+if (admin && process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const svc = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    if (!admin.apps.length) {
+      admin.initializeApp({ credential: admin.credential.cert(svc) });
+    }
+    fcmReady = true;
+    console.log('[push] Firebase native push: live');
+  } catch (e) {
+    console.error('[push] Firebase init failed:', e.message);
+  }
+} else {
+  console.log('[push] Firebase native push: not configured (set FIREBASE_SERVICE_ACCOUNT to enable)');
+}
+
+function fcmConfigured() { return fcmReady; }
+
+/** Deliver a push to every native (Android/iOS) device a user has registered. */
+async function sendFcmToUser(userId, payload, badge) {
+  if (!fcmReady) return;
+  let rows;
+  try { rows = db.prepare('SELECT * FROM native_push_tokens WHERE user_id = ?').all(userId); }
+  catch (e) { return; }
+  if (!rows || !rows.length) return;
+  for (const row of rows) {
+    const msg = {
+      token: row.token,
+      notification: { title: payload.title || 'RenewEQ CRM', body: payload.body || '' },
+      data: {
+        url: String((payload && payload.url) || '/'),
+        badge: String(badge || 0),
+      },
+      android: {
+        priority: 'high',
+        notification: { notificationCount: badge || 0, defaultSound: true },
+      },
+      apns: { payload: { aps: { badge: badge || 0, sound: 'default' } } },
+    };
+    try {
+      await admin.messaging().send(msg);
+    } catch (err) {
+      const code = err && (err.errorInfo && err.errorInfo.code || err.code) || '';
+      // Drop tokens that Firebase reports as permanently invalid.
+      if (String(code).includes('registration-token-not-registered') ||
+          String(code).includes('invalid-registration-token') ||
+          String(code).includes('invalid-argument')) {
+        try { db.prepare('DELETE FROM native_push_tokens WHERE id = ?').run(row.id); } catch (e) {}
+      } else {
+        console.error('[push] FCM send failed:', err && err.message);
+      }
+    }
+  }
+}
+
 /** Count a user's unread inbound activity (texts + voicemails + calls). */
 function unreadInboxCount(userId) {
   try {
@@ -62,28 +125,56 @@ router.post('/unsubscribe', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Register / drop a native (Android/iOS) FCM device token.
+router.post('/native-register', requireAuth, (req, res) => {
+  const token = req.body && (req.body.token || req.body.value);
+  const platform = (req.body && req.body.platform) || 'android';
+  if (!token) return res.status(400).json({ error: 'token required' });
+  const existing = db.prepare('SELECT id FROM native_push_tokens WHERE token = ?').get(token);
+  if (existing) {
+    db.prepare('UPDATE native_push_tokens SET user_id = ?, platform = ?, created_at = ? WHERE token = ?')
+      .run(req.user.id, platform, now(), token);
+  } else {
+    db.prepare('INSERT INTO native_push_tokens (id, user_id, token, platform, created_at) VALUES (?,?,?,?,?)')
+      .run(uid(), req.user.id, token, platform, now());
+  }
+  res.status(201).json({ ok: true });
+});
+
+router.post('/native-unregister', requireAuth, (req, res) => {
+  const token = req.body && req.body.token;
+  if (token) db.prepare('DELETE FROM native_push_tokens WHERE token = ?').run(token);
+  res.json({ ok: true });
+});
+
 /** Deliver a push to every device a user has registered. Never throws. */
 async function sendPushToUser(userId, payload) {
-  if (!configured) return;
-  let subs;
-  try { subs = db.prepare('SELECT * FROM push_subscriptions WHERE user_id = ?').all(userId); }
-  catch (e) { return; }
-  if (!subs || !subs.length) return;
-  // Attach the current unread count so the service worker can set the app badge.
-  const body = JSON.stringify(Object.assign({ badge: unreadInboxCount(userId) }, payload || {}));
-  for (const row of subs) {
-    let sub;
-    try { sub = JSON.parse(row.sub); } catch (e) { continue; }
-    try { await webpush.sendNotification(sub, body); }
-    catch (err) {
-      const code = err && err.statusCode;
-      if (code === 404 || code === 410) { try { db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(row.id); } catch (e) {} }
-      else console.error('[push] send failed:', err && err.message);
+  const badge = unreadInboxCount(userId);
+  // Web push (PWA / desktop browsers) via VAPID.
+  if (configured) {
+    let subs;
+    try { subs = db.prepare('SELECT * FROM push_subscriptions WHERE user_id = ?').all(userId); }
+    catch (e) { subs = null; }
+    if (subs && subs.length) {
+      const body = JSON.stringify(Object.assign({ badge }, payload || {}));
+      for (const row of subs) {
+        let sub;
+        try { sub = JSON.parse(row.sub); } catch (e) { continue; }
+        try { await webpush.sendNotification(sub, body); }
+        catch (err) {
+          const code = err && err.statusCode;
+          if (code === 404 || code === 410) { try { db.prepare('DELETE FROM push_subscriptions WHERE id = ?').run(row.id); } catch (e) {} }
+          else console.error('[push] send failed:', err && err.message);
+        }
+      }
     }
   }
+  // Native push (Android/iOS) via Firebase Cloud Messaging.
+  try { await sendFcmToUser(userId, payload || {}, badge); } catch (e) {}
 }
 
 module.exports = router;
 module.exports.sendPushToUser = sendPushToUser;
 module.exports.pushConfigured = pushConfigured;
+module.exports.fcmConfigured = fcmConfigured;
 module.exports.unreadInboxCount = unreadInboxCount;
