@@ -339,6 +339,7 @@ async function bootApp() {
   registerServiceWorker();
   setupPush();
   setupNativePush();
+  setupNativeCalls(); // native background incoming-call ringing (mobile app)
 }
 
 function isAdmin() { return state.user && state.user.role === 'admin'; }
@@ -443,12 +444,21 @@ async function initTwilioDevice() {
     const device = new Twilio.Device(r.token, { codecPreferences: ['opus', 'pcmu'], logLevel: 'error' });
     device.on('registered', function () { console.log('[twilio] device registered'); });
     device.on('error', function (e) { console.error('[twilio] device error:', e && e.message); });
-    device.on('incoming', onTwilioIncoming);
     device.on('tokenWillExpire', async function () {
       try { const t = await api('GET', '/twilio/token'); if (t && t.token) device.updateToken(t.token); }
       catch (e) { /* ignore */ }
     });
-    await device.register();
+    if (isNativeApp() && capPlugin('NativeCalls')) {
+      // Inside the native app, INCOMING calls ring natively (CallKit on iOS /
+      // full-screen call notification on Android) via the NativeCalls plugin —
+      // even when the app is closed. Don't also register this WebView client
+      // for incoming, or every call would ring twice. The Device is still used
+      // for OUTBOUND calls (device.connect works without register()).
+      console.log('[twilio] native incoming-call ringing active — WebView handles outbound only');
+    } else {
+      device.on('incoming', onTwilioIncoming);
+      await device.register();
+    }
     state.twilio.device = device;
   } catch (e) {
     console.error('[twilio] init failed:', e);
@@ -523,12 +533,23 @@ function toggleMute() {
   const t = state.twilio;
   if (!t.call) return;
   t.muted = !t.muted;
-  try { t.call.mute(t.muted); } catch (e) {}
+  if (t.call.__native) {
+    // Native-answered call: audio lives in the native Twilio Voice SDK.
+    const NC = capPlugin('NativeCalls');
+    if (NC) { try { NC.setMuted({ muted: t.muted }); } catch (e) {} }
+  } else {
+    try { t.call.mute(t.muted); } catch (e) {}
+  }
   renderCallWidget();
 }
 
 function hangup() {
   const t = state.twilio;
+  if (t.call && t.call.__native) {
+    const NC = capPlugin('NativeCalls');
+    if (NC) { try { NC.disconnect(); } catch (e) {} }
+    return; // the plugin's callDisconnected event finishes the cleanup/logging
+  }
   if (t.call) { try { t.call.disconnect(); } catch (e) {} }
 }
 
@@ -1776,18 +1797,14 @@ function renderContactTable(list) {
 
 /* ------------------------------ Contact modal ------------------------------ */
 
+/* Details-section inputs. There is ONE contact source per lead: the primary
+   Contact Name/Phone/Email block plus a Contact Type selector (Listing Agent
+   vs FSBO Seller). On save the values are mirrored into the legacy
+   seller/agent sub-fields so older code paths keep working
+   (see deriveContactIdentity). */
 const CONTACT_TEXT_FIELDS = [
-  { key: 'name', label: 'Name' },
-  { key: 'phone', label: 'Phone' },
-  { key: 'email', label: 'Email' },
   { key: 'property', label: 'Property Address' },
   { key: 'zillow', label: 'Zillow URL' }
-];
-const AGENT_FIELDS = [
-  { key: 'agentName', label: 'Agent Name' },
-  { key: 'agentCompany', label: 'Agent Company' },
-  { key: 'agentPhone', label: 'Agent Phone' },
-  { key: 'agentEmail', label: 'Agent Email' }
 ];
 const DATE_FIELDS = [
   { key: 'executedContract', label: 'Executed Contract' },
@@ -1918,7 +1935,24 @@ function openContactModal(contact, leadDraft) {
   }
 
   // ---- Details
+  // Single primary-contact block: the contact is EITHER the listing agent or
+  // the FSBO seller — one set of Name/Phone/Email plus a type selector.
+  // Legacy records (saved before this change) prefill from the old
+  // seller/agent sub-fields when the primary columns are empty.
+  const ctFsbo = truthy(c.isFsbo);
+  const ctType = ctFsbo ? 'fsbo' : 'agent';
+  const ctName = c.name || (ctFsbo ? c.sellerName : c.agentName) || '';
+  const ctPhone = c.phone || (ctFsbo ? c.fsboPhone : c.agentPhone) || '';
+  const ctEmail = c.email || (ctFsbo ? c.fsboEmail : c.agentEmail) || '';
   html += '<div class="sec" style="margin-top:0"><h4>Details</h4><div class="grid2">';
+  html += fieldHtml({ key: 'name', label: 'Contact Name' }, ctName);
+  html += '<div class="field"><label>Contact Type</label><select data-field="contact_type" id="contactTypeSel">' +
+    '<option value="agent"' + (ctType === 'agent' ? ' selected' : '') + '>Listing Agent</option>' +
+    '<option value="fsbo"' + (ctType === 'fsbo' ? ' selected' : '') + '>FSBO Seller</option>' +
+    '</select></div>';
+  html += fieldHtml({ key: 'phone', label: 'Contact Phone' }, ctPhone);
+  html += fieldHtml({ key: 'email', label: 'Contact Email' }, ctEmail);
+  html += fieldHtml({ key: 'agentCompany', label: 'Company / Brokerage (optional)' }, c.agentCompany || '');
   CONTACT_TEXT_FIELDS.forEach(function (f) { html += fieldHtml(f, c[f.key] || ''); });
   html += '<div class="field"><label>Stage</label><select data-field="stage" id="stageSelect">';
   STAGES.forEach(function (s) {
@@ -1997,20 +2031,9 @@ function openContactModal(contact, leadDraft) {
     '<textarea data-field="listingDescription" rows="4">' + esc(c.listingDescription || '') + '</textarea></div>' +
     '</div>';
 
-  // ---- FSBO
-  const fsboOn = truthy(c.isFsbo);
-  html += '<div class="sec"><h4>For Sale By Owner</h4>' +
-    '<div class="toggles">' + toggleHtml('isFsbo', 'FSBO — no listing agent', fsboOn) + '</div>' +
-    '<div id="fsboFields" class="grid3" style="margin-top:14px' + (fsboOn ? '' : ';display:none') + '">' +
-    fieldHtml({ key: 'sellerName', label: 'Seller Name' }, c.sellerName || '') +
-    fieldHtml({ key: 'fsboPhone', label: 'FSBO Phone' }, c.fsboPhone || '') +
-    fieldHtml({ key: 'fsboEmail', label: 'FSBO Email' }, c.fsboEmail || '') +
-    '</div></div>';
-
-  // ---- Listing agent (hidden entirely when FSBO is on — no listing agent)
-  html += '<div class="sec" id="agentSection"' + (fsboOn ? ' style="display:none"' : '') + '><h4>Listing Agent</h4><div class="grid3">';
-  AGENT_FIELDS.forEach(function (f) { html += fieldHtml(f, c[f.key] || ''); });
-  html += '</div></div>';
+  // (The separate "For Sale By Owner" and "Listing Agent" sections were
+  //  replaced by the single primary-contact block + Contact Type selector in
+  //  Details above.)
 
   // ---- Dates (Offer Accepted date auto-fills when the stage hits Offer Accepted)
   html += '<div class="sec"><h4>Important Dates</h4><div class="grid2">';
@@ -2193,17 +2216,6 @@ function openContactModal(contact, leadDraft) {
   $('#cmClose').addEventListener('click', closeModal);
   $('#cmCancel').addEventListener('click', closeModal);
 
-  const fsboCb = $('[data-toggle="isFsbo"]', overlay);
-  if (fsboCb) {
-    fsboCb.addEventListener('change', function () {
-      const box = $('#fsboFields', overlay);
-      if (box) box.style.display = fsboCb.checked ? '' : 'none';
-      // FSBO = no listing agent → hide the whole Listing Agent section.
-      const agentSec = $('#agentSection', overlay);
-      if (agentSec) agentSec.style.display = fsboCb.checked ? 'none' : '';
-    });
-  }
-
   // Stage → Dead Deal reveals the Dead Deal / Archive outcome section.
   const stageSel = $('#stageSelect', overlay);
   if (stageSel) {
@@ -2218,7 +2230,7 @@ function openContactModal(contact, leadDraft) {
     $all('[data-field]', overlay).forEach(function (elm) {
       out[elm.getAttribute('data-field')] = elm.value;
     });
-    ['dnc', 'consent_sms', 'consent_rvm', 'isFsbo'].forEach(function (k) {
+    ['dnc', 'consent_sms', 'consent_rvm'].forEach(function (k) {
       const cb = $('[data-toggle="' + k + '"]', overlay);
       if (cb) out[k] = cb.checked;
     });
@@ -2226,17 +2238,39 @@ function openContactModal(contact, leadDraft) {
     return out;
   }
 
+  /* ONE contact source: the primary Contact Name/Phone/Email block + the
+     Contact Type selector. `isFsbo` is driven by the type dropdown (fsbo vs
+     agent), and the primary values are mirrored back into the matching legacy
+     seller/agent sub-fields so search, calling, texting and older render code
+     (which falls back to fsboPhone/agentPhone) all keep working. */
+  function deriveContactIdentity(payload) {
+    const fsbo = payload.contact_type === 'fsbo';
+    payload.isFsbo = fsbo;
+    payload.name = payload.name || payload.property ||
+      (isNew ? 'New Lead' : (c.name || 'Contact'));
+    payload.phone = payload.phone || '';
+    payload.email = payload.email || '';
+    if (fsbo) {
+      payload.sellerName = payload.name;
+      payload.fsboPhone = payload.phone;
+      payload.fsboEmail = payload.email;
+    } else {
+      payload.agentName = payload.name;
+      payload.agentPhone = payload.phone;
+      payload.agentEmail = payload.email;
+      // agentCompany comes straight from the Company / Brokerage input.
+    }
+    return payload;
+  }
+
   // ---- Save
   $('#cmSave').addEventListener('click', async function () {
     const btn = this;
     btn.disabled = true;
-    const payload = collect();
+    const payload = deriveContactIdentity(collect());
     try {
       let saved;
       if (isNew) {
-        if (isLead && !payload.name) {
-          payload.name = payload.sellerName || payload.agentName || payload.property || 'New Lead';
-        }
         saved = await api('POST', isLead ? '/leads' : '/contacts', payload);
         toast(isLead ? 'New lead saved to ' + STAGES[0] : 'Contact created', 'ok');
       } else {
@@ -2672,6 +2706,11 @@ async function setupNativePush() {
       if (!token) return;
       let platform = 'android';
       try { if (window.Capacitor.getPlatform) platform = window.Capacitor.getPlatform(); } catch (e) {}
+      // iOS: this callback delivers the raw APNs token, which the server's
+      // Firebase sender can NOT push to. When the NativeCalls plugin is
+      // present it supplies the real FCM token via its own 'pushTokenReceived'
+      // event (see setupNativeCalls) — skip registering the APNs token.
+      if (platform === 'ios' && capPlugin('NativeCalls')) return;
       try { await api('POST', '/push/native-register', { token: token, platform: platform }); } catch (e) {}
     });
     Push.addListener('registrationError', function (e) { console.warn('[push] native registration error:', e); });
@@ -2686,6 +2725,88 @@ async function setupNativePush() {
     }
     if (perm && perm.receive === 'granted') { await Push.register(); }
   } catch (e) { console.warn('[push] native setup failed:', e && e.message); }
+}
+
+/* ---- Native incoming-call ringing (NativeCalls Capacitor plugin) ----
+   iOS:     Twilio VoIP push → PushKit → CallKit full-screen ring → native
+            Twilio Voice iOS SDK carries the audio.
+   Android: high-priority FCM data push → full-screen incoming-call
+            notification → native Twilio Voice Android SDK carries the audio.
+   The WebView only mirrors the call state (timer / notes / mute / hang up /
+   auto-logging); ringing and answering happen natively, even when the app is
+   closed. See the crm-native repo, plugins/native-calls. */
+
+let _nativeVoiceRegAt = 0;
+
+/** Fetch a platform token and (re)register this device for call pushes. */
+async function registerNativeVoice() {
+  const NC = capPlugin('NativeCalls');
+  if (!NC) return;
+  if (!state.twilio.status || !state.twilio.status.voiceConfigured) return;
+  if (Date.now() - _nativeVoiceRegAt < 10 * 60 * 1000) return; // throttle re-registration
+  try {
+    let platform = 'android';
+    try { if (window.Capacitor.getPlatform) platform = window.Capacitor.getPlatform(); } catch (e) {}
+    const r = await api('GET', '/twilio/token?platform=' + encodeURIComponent(platform));
+    if (!r || !r.token) return;
+    if (!r.nativePush) {
+      // Server has no Twilio Push Credential for this platform yet — the
+      // foreground softphone still works; background ringing stays off.
+      console.log('[native-calls] no push credential configured for ' + platform);
+      return;
+    }
+    await NC.register({ accessToken: r.token });
+    _nativeVoiceRegAt = Date.now();
+    console.log('[native-calls] registered for background incoming calls');
+  } catch (e) {
+    console.warn('[native-calls] register failed:', e && e.message);
+  }
+}
+
+async function setupNativeCalls() {
+  if (!isNativeApp()) return;
+  const NC = capPlugin('NativeCalls');
+  if (!NC) return;
+  try {
+    // iOS only: the plugin's Firebase integration supplies the FCM token used
+    // for regular (text / voicemail) notifications — see setupNativePush.
+    NC.addListener('pushTokenReceived', async function (e) {
+      const token = e && e.token;
+      if (!token) return;
+      let platform = 'ios';
+      try { if (window.Capacitor.getPlatform) platform = window.Capacitor.getPlatform(); } catch (err) {}
+      try { await api('POST', '/push/native-register', { token: token, platform: platform }); } catch (err) {}
+    });
+    // A natively-answered call connected — mirror it in the call widget so the
+    // user gets the timer, notes box, mute and hang-up, plus auto-logging.
+    NC.addListener('callConnected', function (e) {
+      const from = (e && e.from) || '';
+      const match = findContactByNumberLocal(from);
+      const t = state.twilio;
+      t.call = { __native: true };
+      t.incoming = null;
+      t.number = from;
+      t.contactId = match ? match.id : null;
+      t.contactName = match ? (match.name || '') : '';
+      t.direction = 'inbound';
+      t.note = ''; t.seconds = 0; t.muted = false;
+      startCallTimer();
+      renderCallWidget();
+    });
+    NC.addListener('callDisconnected', function () {
+      const t = state.twilio;
+      if (t.call && t.call.__native) onCallEnd();
+    });
+  } catch (e) {
+    console.warn('[native-calls] setup failed:', e && e.message);
+  }
+  registerNativeVoice();
+  // Re-register whenever the app returns to the foreground (access tokens
+  // expire after an hour; Twilio needs a fresh one to refresh the binding).
+  try {
+    const App = capPlugin('App');
+    if (App && App.addListener) App.addListener('resume', registerNativeVoice);
+  } catch (e) {}
 }
 
 async function loadActivities(contactId) {
