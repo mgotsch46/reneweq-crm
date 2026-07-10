@@ -16,7 +16,7 @@ const DEAD_STAGE = 'Dead Deal';
 let LEAD_SOURCES = ['Manual Upload', 'Zillow', 'Referral', 'Email Campaign', 'Custom'];
 let DEAD_REASONS = ['Did not accept offer', 'Sold', 'Other'];
 // Lead triage statuses (keep in sync with LEAD_STATUSES in routes/contacts.js).
-const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING', 'Contacted — Left VM', 'Contacted — Had Conversation'];
+const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING'];
 const TIMEZONES = [
   ['America/New_York', 'Eastern (New York)'],
   ['America/Chicago', 'Central (Chicago)'],
@@ -1903,10 +1903,8 @@ function openContactModal(contact, leadDraft) {
 
   let html = '<div class="overlay" id="contactOverlay"><div class="modal">' +
     '<div class="mhead"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
-    '<div class="mhead-actions">' +
-    '<button class="btn small" id="cmSaveTop" title="Save (same as the Save button at the bottom)">Save</button>' +
     '<button class="close" id="cmClose" title="Close">&times;</button>' +
-    '</div></div>' +
+    '</div>' +
     '<div class="mbody">';
 
   // ---- Admin bar: assign-to-user + Keep-as-NEW pin (always near the top)
