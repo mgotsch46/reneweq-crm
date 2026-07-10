@@ -502,6 +502,7 @@ const WHOLESALE_COLUMNS = [
 const PRICE_COLUMNS = [
   ['offerPrice', 'REAL'],
   ['finalPrice', 'REAL'],
+  ['suggestedOffer', 'REAL'],
 ];
 
 {
