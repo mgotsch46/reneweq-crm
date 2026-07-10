@@ -33,13 +33,13 @@ const CONTACT_FIELDS = [
   'wholesale_fee', 'lead_source', 'offerAcceptedDate', 'archived',
   'dead_reason', 'dead_notes',
   // Deal price fields (List Price reuses `price` above)
-  'offerPrice', 'finalPrice',
+  'offerPrice', 'finalPrice', 'suggestedOffer',
 ];
 
 /** Lead Engine triage statuses. */
 const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING'];
 
-const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price', 'wholesale_fee', 'offerPrice', 'finalPrice'];
+const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price', 'wholesale_fee', 'offerPrice', 'finalPrice', 'suggestedOffer'];
 const BOOL_FIELDS = ['dnc', 'consent_sms', 'consent_rvm', 'rvmStatus', 'isFsbo', 'status_locked', 'archived'];
 
 /** Coerce loose client input to a number or null (node:sqlite rejects '' / NaN). */
@@ -295,6 +295,7 @@ function buildContact(body, ownerId) {
     price: toNum(body.price),
     offerPrice: toNum(body.offerPrice),
     finalPrice: toNum(body.finalPrice),
+    suggestedOffer: toNum(body.suggestedOffer),
     created_at: ts,
     updated_at: ts,
   };
@@ -311,7 +312,7 @@ function insertContactRow(contact) {
       daysOnMarket, priceChanges, propertyTax, photoUrl, sourceUrl, keywords,
       city, state, listingDescription,
       wholesale_fee, lead_source, offerAcceptedDate, archived, dead_reason, dead_notes,
-      price, offerPrice, finalPrice,
+      price, offerPrice, finalPrice, suggestedOffer,
       created_at, updated_at
     ) VALUES (
       @id, @owner_id, @name, @email, @phone, @property, @zillow,
@@ -322,7 +323,7 @@ function insertContactRow(contact) {
       @daysOnMarket, @priceChanges, @propertyTax, @photoUrl, @sourceUrl, @keywords,
       @city, @state, @listingDescription,
       @wholesale_fee, @lead_source, @offerAcceptedDate, @archived, @dead_reason, @dead_notes,
-      @price, @offerPrice, @finalPrice,
+      @price, @offerPrice, @finalPrice, @suggestedOffer,
       @created_at, @updated_at
     )
   `).run(contact);
