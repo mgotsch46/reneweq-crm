@@ -37,6 +37,25 @@ const API_KEY_SECRET = () => process.env.TWILIO_API_KEY_SECRET || '';
 const TWIML_APP_SID = () => process.env.TWILIO_TWIML_APP_SID || '';
 const FROM_NUMBER = () => process.env.TWILIO_FROM || process.env.TWILIO_FROM_NUMBER || '';
 
+// --- Native incoming-call push (optional) ------------------------------------
+// Twilio "Push Credentials" let the NATIVE mobile apps ring like a real phone
+// even when closed. Create them in the Twilio Console (see
+// NATIVE-CALLING-SETUP.md in the app repo):
+//   TWILIO_APN_PUSH_CREDENTIAL_SID — Apple VoIP Services certificate (iOS)
+//   TWILIO_FCM_PUSH_CREDENTIAL_SID — Firebase Cloud Messaging key (Android)
+// When these are NOT set, everything behaves exactly as before (the browser /
+// foreground softphone keeps working; there is just no background ringing).
+const APN_PUSH_CREDENTIAL_SID = () => process.env.TWILIO_APN_PUSH_CREDENTIAL_SID || '';
+const FCM_PUSH_CREDENTIAL_SID = () => process.env.TWILIO_FCM_PUSH_CREDENTIAL_SID || '';
+
+/** The Twilio Push Credential SID for a native platform ('' when unavailable). */
+function pushCredentialSidFor(platform) {
+  const p = String(platform || '').toLowerCase();
+  if (p === 'ios') return APN_PUSH_CREDENTIAL_SID();
+  if (p === 'android') return FCM_PUSH_CREDENTIAL_SID();
+  return '';
+}
+
 // --- Call recording + transcription -----------------------------------------
 // Record every call by default; set TWILIO_RECORD_CALLS=false to disable.
 const RECORD_CALLS = () => String(process.env.TWILIO_RECORD_CALLS || 'true').toLowerCase() !== 'false';
@@ -78,9 +97,26 @@ function identityFor(userId) {
   return 'crm_' + String(userId).replace(/[^a-zA-Z0-9_]/g, '');
 }
 
-/** Build a Twilio Voice Access Token (JWT) — same shape the Twilio SDK emits. */
-function buildVoiceToken(identity) {
+/**
+ * Build a Twilio Voice Access Token (JWT) — same shape the Twilio SDK emits.
+ *
+ * `platform` (optional, 'ios' | 'android') adds the matching Push Credential
+ * SID to the voice grant. That is what makes Twilio deliver an APNs VoIP push
+ * (iOS) or a high-priority FCM data push (Android) when the identity is called
+ * while the native app is backgrounded/closed. The NATIVE client is expected to
+ * bind itself by calling the platform Twilio Voice SDK's
+ * `register(accessToken, deviceToken)` with this token (the CRM app does this
+ * through the NativeCalls Capacitor plugin). Without a platform (or without
+ * the env var), the token is identical to the historical browser token.
+ */
+function buildVoiceToken(identity, platform) {
   const nowSec = Math.floor(Date.now() / 1000);
+  const voiceGrant = {
+    incoming: { allow: true },
+    outgoing: { application_sid: TWIML_APP_SID() },
+  };
+  const pushCredSid = pushCredentialSidFor(platform);
+  if (pushCredSid) voiceGrant.push_credential_sid = pushCredSid;
   const payload = {
     jti: `${API_KEY_SID()}-${nowSec}`,
     iss: API_KEY_SID(),
@@ -89,10 +125,7 @@ function buildVoiceToken(identity) {
     exp: nowSec + 3600, // 1 hour
     grants: {
       identity,
-      voice: {
-        incoming: { allow: true },
-        outgoing: { application_sid: TWIML_APP_SID() },
-      },
+      voice: voiceGrant,
     },
   };
   return jwt.sign(payload, API_KEY_SECRET(), {
@@ -407,14 +440,33 @@ router.post('/numbers/assign', requireAuth, async (req, res) => {
   }
 });
 
-/** GET /api/twilio/token — Voice Access Token for this user's browser client. */
+/**
+ * GET /api/twilio/token[?platform=ios|android] — Voice Access Token.
+ *
+ * No `platform` (or an unknown one): the classic browser/WebView token —
+ * unchanged behavior.
+ *
+ * `platform=ios` / `platform=android`: the same token PLUS the platform's
+ * Twilio Push Credential SID in the voice grant (when the matching env var
+ * TWILIO_APN_PUSH_CREDENTIAL_SID / TWILIO_FCM_PUSH_CREDENTIAL_SID is set).
+ * The native app must then call the native Twilio Voice SDK's
+ * `register(accessToken, deviceToken)` — deviceToken being the PushKit VoIP
+ * token on iOS or the FCM token on Android — to start receiving background
+ * incoming-call pushes, and `unregister(...)` on logout. The response's
+ * `nativePush` flag tells the client whether background ringing is available.
+ */
 router.get('/token', requireAuth, (req, res) => {
   if (!voiceConfigured()) {
     return res.status(400).json({ error: 'Twilio Voice is not configured on this server' });
   }
   const identity = identityFor(req.user.id);
+  const platform = (req.query && req.query.platform) || '';
   try {
-    res.json({ token: buildVoiceToken(identity), identity });
+    res.json({
+      token: buildVoiceToken(identity, platform),
+      identity,
+      nativePush: Boolean(pushCredentialSidFor(platform)),
+    });
   } catch (e) {
     console.error('[twilio] token error:', e.message);
     res.status(500).json({ error: 'Could not create voice token' });
@@ -483,12 +535,38 @@ router.post('/voice-inbound', (req, res) => {
     return res.send(voicemailTwiml(null));
   }
   const identity = xmlEscape(identityFor(targetUserId));
-  // Ring the browser client; if it isn't answered, `action` drops to voicemail.
+  // Ring the browser client for 45s (long enough to tap the push notification,
+  // open the app, and answer); if it isn't answered, `action` drops to voicemail.
   // Pass the rung user's id so the fallback plays THAT user's greeting.
   const fbAction = '/api/twilio/voice-inbound-fallback?u=' + encodeURIComponent(targetUserId);
   // Record the answered call; map it to the caller's contact + the rung user.
   const caller = (req.body && (req.body.From || req.body.Caller)) || '';
   const recAttrs = recordingAttrs({ dir: 'inbound', uid: targetUserId, peer: caller });
+  // "Option B" ringing: high-priority push so the phone rings/vibrates even
+  // when the app is closed — she can tap the notification, the app opens,
+  // and the browser/app client answers while Twilio is still dialing.
+  // Best-effort only: a push failure must never break the TwiML response.
+  try {
+    let callerName = caller;
+    try {
+      const match = findContactByPhone(caller);
+      if (match) {
+        const row = db.prepare('SELECT name FROM contacts WHERE id = ?').get(match.id);
+        if (row && row.name) callerName = row.name;
+      }
+    } catch (e) { /* name lookup is best-effort */ }
+    const callSid = (req.body && req.body.CallSid) || Date.now();
+    sendPushToUser(targetUserId, {
+      title: 'Incoming call',
+      body: 'Call from ' + (callerName || 'unknown number'),
+      url: '/',
+      tag: 'call-' + callSid,
+      // Distinct ring on the native apps when backgrounded/closed (mirrors
+      // /sms-inbound). Web push ignores these extra keys.
+      sound: 'call_ring',
+      channelId: 'crm_calls',
+    });
+  } catch (e) { /* push is best-effort — never block the call */ }
   // Optional consent notice played to the CALLER before the agent connects.
   const notice = RECORDING_ANNOUNCE()
     ? '<Say voice="alice">' + xmlEscape(RECORDING_ANNOUNCE_TEXT()) + '</Say>'
@@ -496,7 +574,7 @@ router.post('/voice-inbound', (req, res) => {
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
     '<Response>' + notice +
-    `<Dial answerOnBridge="true" timeout="25" action="${xmlEscape(fbAction)}" method="POST"${recAttrs}><Client>${identity}</Client></Dial></Response>`
+    `<Dial answerOnBridge="true" timeout="45" action="${xmlEscape(fbAction)}" method="POST"${recAttrs}><Client>${identity}</Client></Dial></Response>`
   );
 });
 
@@ -798,6 +876,12 @@ router.post('/sms-inbound', (req, res) => {
         const payload = {
           title: 'New text' + (label && label.name ? ' from ' + label.name : ''),
           body: String(bodyText).slice(0, 140), url: '/', tag: 'sms-' + contact.id,
+          // Distinct "text chime" on the native apps when backgrounded/closed:
+          // iOS plays the bundled text_chime.caf; Android routes the alert to
+          // the "crm_texts" notification channel (custom sound, created by the
+          // NativeCalls plugin). Web push ignores these extra keys.
+          sound: 'text_chime',
+          channelId: 'crm_texts',
         };
         sendPushToUser(contact.owner_id, payload);
         if (numberOwner && numberOwner.id !== contact.owner_id) sendPushToUser(numberOwner.id, payload);
@@ -813,3 +897,4 @@ router.post('/sms-inbound', (req, res) => {
 });
 
 module.exports = { router, voiceConfigured, smsConfigured };
+

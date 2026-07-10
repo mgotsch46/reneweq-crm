@@ -56,13 +56,30 @@ if (admin && process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 function fcmConfigured() { return fcmReady; }
 
-/** Deliver a push to every native (Android/iOS) device a user has registered. */
+/**
+ * Deliver a push to every native (Android/iOS) device a user has registered.
+ *
+ * Optional payload keys for a DISTINCT notification sound (used by inbound
+ * texts): `sound` — base file name without extension. iOS plays
+ * "<sound>.caf" bundled in the app; Android plays res/raw/<sound> via the
+ * notification channel named by `channelId` (the channel's sound wins on
+ * Android 8+, but we set both for older devices). Omit both keys for the
+ * default system sound — exactly the old behavior.
+ */
 async function sendFcmToUser(userId, payload, badge) {
   if (!fcmReady) return;
   let rows;
   try { rows = db.prepare('SELECT * FROM native_push_tokens WHERE user_id = ?').all(userId); }
   catch (e) { return; }
   if (!rows || !rows.length) return;
+  const sound = (payload && payload.sound) ? String(payload.sound) : '';
+  const androidNotif = { notificationCount: badge || 0 };
+  if (sound) {
+    androidNotif.sound = sound; // res/raw/<sound> (pre-Android 8 fallback)
+    androidNotif.channelId = (payload && payload.channelId) || 'crm_texts';
+  } else {
+    androidNotif.defaultSound = true;
+  }
   for (const row of rows) {
     const msg = {
       token: row.token,
@@ -73,9 +90,9 @@ async function sendFcmToUser(userId, payload, badge) {
       },
       android: {
         priority: 'high',
-        notification: { notificationCount: badge || 0, defaultSound: true },
+        notification: androidNotif,
       },
-      apns: { payload: { aps: { badge: badge || 0, sound: 'default' } } },
+      apns: { payload: { aps: { badge: badge || 0, sound: sound ? sound + '.caf' : 'default' } } },
     };
     try {
       await admin.messaging().send(msg);
