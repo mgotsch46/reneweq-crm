@@ -1161,9 +1161,12 @@ function pipelineStages() {
   return STAGES.filter(function (s) { return s !== DEAD_STAGE; });
 }
 
-/** Active (non-dead) contacts in the current owner scope. */
+/** Active (non-dead, non-archived) contacts in the current owner scope.
+ *  Archived deals are excluded so their value drops out of Pipeline value/counts. */
 function pipelineActive() {
-  return state.contacts.filter(function (c) { return (c.stage || STAGES[0]) !== DEAD_STAGE; });
+  return state.contacts.filter(function (c) {
+    return (c.stage || STAGES[0]) !== DEAD_STAGE && !truthy(c.archived);
+  });
 }
 
 /** Horizontal process timeline showing where a deal sits in the workflow.
@@ -1287,6 +1290,7 @@ function renderPipelineList() {
   const q = state.pipelineSearch || '';
   const sel = state.pipelineStage;
   let cards = state.contacts.filter(function (c) {
+    if (truthy(c.archived)) return false; // archived deals never show in the pipeline
     const st = c.stage || STAGES[0];
     if (sel) { if (st !== sel) return false; }
     else if (st === DEAD_STAGE) return false;
