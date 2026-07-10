@@ -515,6 +515,11 @@ const PRICE_COLUMNS = [
   }
 }
 
+// Backfill: give every contact WITHOUT an estimated wholesale fee the default
+// $5,000 (same default new leads/imports now receive). Idempotent — only NULL
+// fees are touched, so any contact with a real fee is never overwritten.
+try { db.exec('UPDATE contacts SET wholesale_fee = 5000 WHERE wholesale_fee IS NULL'); } catch (e) {}
+
 // One-time stage remap: move any legacy stage names to the new set.
 {
   const upd = db.prepare('UPDATE contacts SET stage = ? WHERE stage = ?');
