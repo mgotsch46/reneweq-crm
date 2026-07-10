@@ -503,6 +503,7 @@ const PRICE_COLUMNS = [
   ['offerPrice', 'REAL'],
   ['finalPrice', 'REAL'],
   ['suggestedOffer', 'REAL'],
+  ['contact_type', 'TEXT'],
 ];
 
 {
