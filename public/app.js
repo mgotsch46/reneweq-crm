@@ -1068,23 +1068,49 @@ function fmtISODate(d) {
 
 /* ------------------------------ Pipeline ------------------------------ */
 
+const PIPELINE_STYLE = '<style>' +
+  '#view-pipeline .pl-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}' +
+  '#view-pipeline .pl-metric{background:rgba(255,255,255,.05);border:1px solid var(--line-soft);border-radius:14px;padding:12px 14px}' +
+  '#view-pipeline .pl-metric .lbl{font-size:12px;color:var(--muted)}' +
+  '#view-pipeline .pl-metric .val{font-size:22px;font-weight:800;margin-top:2px}' +
+  '#view-pipeline .pl-bars{display:flex;flex-direction:column;gap:6px;background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;padding:12px}' +
+  '#view-pipeline .pl-bar{display:flex;align-items:center;gap:10px;width:100%;background:transparent;border:1px solid transparent;border-radius:10px;padding:6px 8px;cursor:pointer;color:var(--text);text-align:left;font:inherit}' +
+  '#view-pipeline .pl-bar:hover{background:rgba(255,255,255,.05)}' +
+  '#view-pipeline .pl-bar.active{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.5)}' +
+  '#view-pipeline .pl-bar .nm{flex:0 0 132px;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '#view-pipeline .pl-bar .track{flex:1;height:15px;background:rgba(255,255,255,.09);border-radius:999px;overflow:hidden}' +
+  '#view-pipeline .pl-bar .fill{display:block;height:100%;background:var(--accent);border-radius:999px}' +
+  '#view-pipeline .pl-bar .n{flex:0 0 26px;text-align:right;font-size:13px;font-weight:700}' +
+  '#view-pipeline .pl-listhead{display:flex;align-items:center;gap:10px;margin:18px 0 8px}' +
+  '#view-pipeline .pl-listhead .t{font-size:14px;font-weight:700}' +
+  '#view-pipeline .pl-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:rgba(239,68,68,.16);border:1px solid rgba(239,68,68,.45);color:var(--text);padding:4px 10px;border-radius:999px;cursor:pointer}' +
+  '#view-pipeline .pl-row{display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--line-soft);border-radius:14px;margin-bottom:8px;background:var(--surface)}' +
+  '#view-pipeline .pl-row:hover{border-color:rgba(96,165,250,.5)}' +
+  '#view-pipeline .pl-row .info{flex:1;min-width:0;cursor:pointer}' +
+  '#view-pipeline .pl-row .addr{font-weight:700}' +
+  '#view-pipeline .pl-row .sub{color:var(--muted);font-size:12px;margin-top:2px}' +
+  '#view-pipeline .pl-row select{min-width:152px}' +
+  '#view-pipeline .pl-empty{color:var(--muted);padding:18px;text-align:center}' +
+  '</style>';
+
 function renderPipeline() {
   const root = $('#view-pipeline');
-  root.innerHTML = '' +
+  root.innerHTML = PIPELINE_STYLE +
     '<div class="viewhead">' +
     '  <h2>Pipeline</h2>' +
     '  <button class="btn" id="npBtn">+ New Contact</button>' +
     '  <button class="btn blue" id="alBtn">+ Add Lead</button>' +
     '  <input class="search big" id="pipeSearch" type="search" placeholder="Search name, phone, email, or address…" value="' + escAttr(state.pipelineSearch || '') + '">' +
-    '  <select class="search sm" id="pipeSort" title="Sort cards within each stage">' +
+    '  <select class="search sm" id="pipeSort" title="Sort the list">' +
     [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['address', 'Address (A–Z)'],
      ['city', 'City (A–Z)'], ['state', 'State (A–Z)'], ['name', 'Contact name (A–Z)'], ['grade', 'Grade (A→F)']]
       .map(function (o) { return '<option value="' + o[0] + '"' + ((state.pipelineSort || 'newest') === o[0] ? ' selected' : '') + '>Sort: ' + o[1] + '</option>'; }).join('') +
     '  </select>' +
     ownerFilterHtml() +
-    '  <span class="hint">Drag cards between stages to update.</span>' +
+    '  <span class="hint">Tap a stage to filter · change a deal’s status with its dropdown.</span>' +
     '</div>' +
-    '<div class="board" id="board"></div>';
+    '<div id="plOverview"></div>' +
+    '<div id="plList"></div>';
 
   $('#npBtn').addEventListener('click', function () { openContactModal(null); });
   $('#alBtn').addEventListener('click', openLeadIntake);
@@ -1094,16 +1120,50 @@ function renderPipeline() {
   if (search) {
     search.addEventListener('input', function () {
       state.pipelineSearch = this.value;
-      renderPipelineBoard(); // re-render only the board so the input keeps focus
+      renderPipelineList(); // re-render only the list so the input keeps focus
     });
   }
   const sortSel = $('#pipeSort');
   if (sortSel) sortSel.addEventListener('change', function () {
     state.pipelineSort = this.value;
-    renderPipelineBoard();
+    renderPipelineList();
   });
 
   renderPipelineBoard();
+}
+
+/** Non-dead pipeline stages, in order. */
+function pipelineStages() {
+  return STAGES.filter(function (s) { return s !== DEAD_STAGE; });
+}
+
+/** Active (non-dead) contacts in the current owner scope. */
+function pipelineActive() {
+  return state.contacts.filter(function (c) { return (c.stage || STAGES[0]) !== DEAD_STAGE; });
+}
+
+/** Vertical process timeline showing where a deal sits in the workflow.
+ *  Done stages get a filled check, the current stage a highlighted ring,
+ *  upcoming stages a muted dot. Used inside the contact modal. */
+function pipelineTimelineHtml(stage) {
+  const stages = pipelineStages();
+  const ci = stages.indexOf(stage);
+  let steps = '';
+  stages.forEach(function (s, i) {
+    const done = i < ci, now = i === ci;
+    const dotBg = done ? 'var(--accent)' : (now ? 'rgba(239,68,68,.22)' : 'rgba(255,255,255,.06)');
+    const dotBd = now ? '2px solid var(--accent)' : '1px solid var(--line)';
+    const line = i < stages.length - 1
+      ? '<span style="position:absolute;left:9px;top:20px;width:2px;height:calc(100% - 4px);background:' + (i < ci ? 'var(--accent)' : 'var(--line-soft)') + ';"></span>'
+      : '';
+    const txt = (done || now) ? 'var(--text)' : 'var(--muted)';
+    steps += '<div style="position:relative;display:flex;align-items:center;gap:12px;padding:4px 0;min-height:24px;">' +
+      line +
+      '<span style="position:relative;z-index:1;width:20px;height:20px;border-radius:50%;background:' + dotBg + ';border:' + dotBd + ';display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-size:12px;color:#fff;">' + (done ? '✓' : '') + '</span>' +
+      '<span style="font-size:' + (now ? '14px' : '13px') + ';font-weight:' + (now ? '700' : '400') + ';color:' + txt + ';">' + esc(s) + (now ? '  ·  current' : '') + '</span>' +
+      '</div>';
+  });
+  return '<div class="sec"><h4>Deal progress</h4><div style="margin-top:6px">' + steps + '</div></div>';
 }
 
 /** Comparator for the pipeline sort dropdown. */
@@ -1137,56 +1197,129 @@ function pipelineMatches(c, q) {
   });
 }
 
-/** Render (or re-render) just the pipeline board columns + wiring. */
+/** Render the whole pipeline: overview (metrics + clickable stage bars) + list. */
 function renderPipelineBoard() {
-  const board = $('#board');
-  if (!board) return;
-  const q = state.pipelineSearch || '';
-  let html = '';
-  STAGES.forEach(function (stage) {
-    const cards = pipelineSortCards(state.contacts.filter(function (c) {
-      return (c.stage || STAGES[0]) === stage && pipelineMatches(c, q);
-    }));
-    html += '<div class="col" data-stage="' + escAttr(stage) + '">' +
-      '<h3><span>' + esc(stage) + '</span><span class="count">' + cards.length + '</span></h3>' +
-      '<div class="cards" data-stage="' + escAttr(stage) + '">';
-    cards.forEach(function (c) { html += pipelineCardHtml(c); });
-    html += '</div></div>';
+  renderPipelineOverview();
+  renderPipelineList();
+}
+
+function pipelineFee(c) { const n = parseFloat(c.wholesale_fee); return isNaN(n) ? 0 : n; }
+function pipelineMoney(n) { return '$' + Math.round(n).toLocaleString(); }
+
+/** Overview: metric cards + one clickable bar per stage (click = filter list). */
+function renderPipelineOverview() {
+  const box = $('#plOverview');
+  if (!box) return;
+  const active = pipelineActive();
+  const totalVal = active.reduce(function (t, c) { return t + pipelineFee(c); }, 0);
+  const soon = active.filter(function (c) {
+    if (!c.closing) return false;
+    const d = new Date(c.closing); if (isNaN(d.getTime())) return false;
+    const days = (d - new Date()) / 86400000;
+    return days >= -1 && days <= 7;
+  }).length;
+
+  const stages = pipelineStages();
+  const counts = {};
+  stages.forEach(function (s) { counts[s] = 0; });
+  active.forEach(function (c) { const s = c.stage || STAGES[0]; if (counts[s] !== undefined) counts[s]++; });
+  const max = Math.max.apply(null, stages.map(function (s) { return counts[s]; }).concat([1]));
+
+  let bars = '';
+  stages.forEach(function (s) {
+    const on = state.pipelineStage === s;
+    const pct = Math.max(4, Math.round(counts[s] / max * 100));
+    bars += '<button type="button" class="pl-bar' + (on ? ' active' : '') + '" data-stage="' + escAttr(s) + '">' +
+      '<span class="nm">' + esc(s) + '</span>' +
+      '<span class="track"><span class="fill" style="width:' + pct + '%"></span></span>' +
+      '<span class="n">' + counts[s] + '</span></button>';
   });
-  board.innerHTML = html;
 
-  // card events
-  $all('.pcard', board).forEach(wirePipelineCard);
+  box.innerHTML =
+    '<div class="pl-metrics">' +
+    '<div class="pl-metric"><div class="lbl">Active deals</div><div class="val">' + active.length + '</div></div>' +
+    '<div class="pl-metric"><div class="lbl">Pipeline value</div><div class="val">' + pipelineMoney(totalVal) + '</div></div>' +
+    '<div class="pl-metric"><div class="lbl">Closing soon</div><div class="val">' + soon + '</div></div>' +
+    '</div>' +
+    '<div class="pl-bars">' + bars + '</div>';
 
-  // column drop targets
-  $all('.col', board).forEach(function (col) {
-    col.addEventListener('dragover', function (ev) {
-      ev.preventDefault();
-      ev.dataTransfer.dropEffect = 'move';
-      col.classList.add('dragover');
+  $all('.pl-bar', box).forEach(function (b) {
+    b.addEventListener('click', function () {
+      const s = b.getAttribute('data-stage');
+      state.pipelineStage = (state.pipelineStage === s ? null : s);
+      renderPipelineOverview();
+      renderPipelineList();
     });
-    col.addEventListener('dragleave', function (ev) {
-      if (!col.contains(ev.relatedTarget)) col.classList.remove('dragover');
+  });
+}
+
+/** List: the deals in the selected bucket (or all), searchable, each with a
+ *  status dropdown; clicking a row opens the contact. */
+function renderPipelineList() {
+  const box = $('#plList');
+  if (!box) return;
+  const q = state.pipelineSearch || '';
+  const sel = state.pipelineStage;
+  let cards = state.contacts.filter(function (c) {
+    const st = c.stage || STAGES[0];
+    if (sel) { if (st !== sel) return false; }
+    else if (st === DEAD_STAGE) return false;
+    return pipelineMatches(c, q);
+  });
+  cards = pipelineSortCards(cards);
+
+  const chip = sel ? '<span class="pl-chip" id="plClear">' + esc(sel) + ' &times;</span>' : '';
+  const head = '<div class="pl-listhead"><span class="t">' + (sel ? esc(sel) : 'All deals') + '</span>' +
+    '<span class="hint">' + cards.length + (cards.length === 1 ? ' deal' : ' deals') + '</span>' + chip + '</div>';
+
+  let rows = '';
+  if (!cards.length) {
+    rows = '<div class="pl-empty">No properties in this view.</div>';
+  } else {
+    cards.forEach(function (c) {
+      const opts = STAGES.map(function (s) {
+        return '<option value="' + escAttr(s) + '"' + ((c.stage || STAGES[0]) === s ? ' selected' : '') + '>' + esc(s) + '</option>';
+      }).join('');
+      const fee = pipelineFee(c);
+      const sub = [c.name || '', fee ? pipelineMoney(fee) : '', (c.imported_at || c.created_at) ? 'Added ' + fmtDate(c.imported_at || c.created_at) : '']
+        .filter(Boolean).join(' · ');
+      rows += '<div class="pl-row" data-id="' + escAttr(c.id) + '">' +
+        '<div class="info" data-open="' + escAttr(c.id) + '">' +
+        '<div class="addr">' + gradeBadge(c) + esc(c.property || '(no address)') + '</div>' +
+        '<div class="sub">' + esc(sub) + '</div></div>' +
+        '<select class="search" data-move="' + escAttr(c.id) + '" title="Change status">' + opts + '</select>' +
+        '</div>';
     });
-    col.addEventListener('drop', async function (ev) {
-      ev.preventDefault();
-      col.classList.remove('dragover');
-      const id = ev.dataTransfer.getData('text/plain');
-      const stage = col.getAttribute('data-stage');
+  }
+  box.innerHTML = head + rows;
+
+  $all('.info[data-open]', box).forEach(function (el) {
+    el.addEventListener('click', function () {
+      const c = state.contacts.find(function (x) { return String(x.id) === String(el.getAttribute('data-open')); });
+      if (c) openContactModal(c);
+    });
+  });
+  const clr = $('#plClear');
+  if (clr) clr.addEventListener('click', function () { state.pipelineStage = null; renderPipelineOverview(); renderPipelineList(); });
+
+  $all('select[data-move]', box).forEach(function (mv) {
+    mv.addEventListener('change', async function () {
+      const id = mv.getAttribute('data-move');
+      const stage = mv.value;
       const c = state.contacts.find(function (x) { return String(x.id) === String(id); });
-      if (!c || !stage || c.stage === stage) return;
+      if (!c || c.stage === stage) return;
       const prev = c.stage;
       c.stage = stage;
-      movePipelineCard(id, stage); // targeted move — no full re-render
       try {
         const updated = await api('PATCH', '/contacts/' + encodeURIComponent(id), { stage: stage });
         if (updated) replaceContact(updated);
-        toast('Moved "' + (c.name || 'contact') + '" to ' + stage, 'ok');
+        toast('Moved "' + (c.name || c.property || 'deal') + '" to ' + stage, 'ok');
       } catch (e) {
         c.stage = prev;
-        movePipelineCard(id, prev);
         toastErr(e);
       }
+      renderPipelineOverview();
+      renderPipelineList();
     });
   });
 }
@@ -1777,6 +1910,11 @@ function openContactModal(contact, leadDraft) {
       '</select></div>' +
       '<button class="btn blue small" id="setNewBtn" title="Change this lead’s status to NEW">Set to NEW</button>' +
       '</div>';
+  }
+
+  // ---- Deal progress timeline (visual reference of where it is in the process)
+  if (!isNew && (c.stage || STAGES[0]) !== DEAD_STAGE) {
+    html += pipelineTimelineHtml(c.stage || STAGES[0]);
   }
 
   // ---- Details
@@ -2575,6 +2713,13 @@ async function loadActivities(contactId) {
       const playBtn = (isVm && a.provider_id)
         ? ' <button class="btn ghost small" data-vmplay="' + escAttr(a.provider_id) + '" data-vmact="' + escAttr(a.id) + '">▶ Play</button>'
         : '';
+      // Two-party CALL recordings: play the audio + view the transcript.
+      const hasCallRec = type === 'call' && a.provider_id;
+      const callBtns = hasCallRec
+        ? ' <button class="btn ghost small" data-callplay="' + escAttr(a.provider_id) + '">▶ Play recording</button>' +
+          ' <button class="btn ghost small" data-tx="' + escAttr(a.provider_id) + '">📄 Transcript</button>'
+        : '';
+      const txBox = hasCallRec ? '<div class="txbox" data-txbox="' + escAttr(a.provider_id) + '"></div>' : '';
       const toggleBtn = isInbound
         ? ' <button class="btn ghost small" data-toggleread="' + escAttr(a.id) + '" data-read="' + (a.read_at ? '1' : '0') + '">' +
           (a.read_at ? 'Mark new' : 'Mark viewed') + '</button>'
@@ -2589,7 +2734,8 @@ async function loadActivities(contactId) {
         (extra.length ? ' <span>' + extra.join(' &middot; ') + '</span>' : '') + '</span>' +
         '<span>' + esc(fmtTimestamp(a.created_at)) + (a.created_by ? ' &middot; ' + esc(a.created_by) : '') + '</span>' +
         '</div>' +
-        '<div>' + esc(a.body || '') + playBtn + toggleBtn + delBtn + '</div>' +
+        '<div>' + esc(a.body || '') + playBtn + callBtns + toggleBtn + delBtn + '</div>' +
+        txBox +
         '</div>';
     }).join('');
     box.scrollTop = box.scrollHeight;
@@ -2603,6 +2749,34 @@ async function loadActivities(contactId) {
           loadActivities(contactId);
           refreshVoicemailBadge();
         } catch (e) {}
+      });
+    });
+
+    // Wire call-recording playback.
+    $all('[data-callplay]', box).forEach(function (b) {
+      b.addEventListener('click', function () { playRecording(b.getAttribute('data-callplay')); });
+    });
+
+    // Wire call-transcript toggle (lazy-loads the transcript, then folds away).
+    $all('[data-tx]', box).forEach(function (b) {
+      b.addEventListener('click', async function () {
+        const id = b.getAttribute('data-tx');
+        const target = $('[data-txbox="' + id + '"]', box);
+        if (!target) return;
+        if (target.innerHTML) { target.innerHTML = ''; return; }
+        target.innerHTML = '<span class="hint">Loading transcript…</span>';
+        try {
+          const r = await api('GET', '/rvm/recordings/' + encodeURIComponent(id) + '/transcript');
+          if (r && r.transcript) {
+            target.innerHTML = '<pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:rgba(0,0,0,0.05);border-radius:8px;padding:8px 10px;margin:4px 0 0;max-height:240px;overflow:auto;">' + esc(r.transcript) + '</pre>';
+          } else if (r && r.status === 'pending') {
+            target.innerHTML = '<span class="hint">Transcript is still processing — check back in a minute.</span>';
+          } else if (r && r.status === 'failed') {
+            target.innerHTML = '<span class="hint">Transcription didn’t complete for this call.</span>';
+          } else {
+            target.innerHTML = '<span class="hint">No transcript available for this call.</span>';
+          }
+        } catch (e) { target.innerHTML = '<span class="hint">Could not load transcript.</span>'; }
       });
     });
 
