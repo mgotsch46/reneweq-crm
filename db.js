@@ -439,6 +439,23 @@ const GOOGLE_TASK_COLUMNS = [
   if (!existing.has('twilio_sid')) {
     db.exec('ALTER TABLE rvm_recordings ADD COLUMN twilio_sid TEXT');
   }
+  // Call recordings + async transcripts (Twilio Voice Intelligence).
+  //   kind              — 'rvm' (default), 'voicemail', or 'call' (two-party call recording)
+  //   transcript        — full transcript text once available
+  //   transcript_status — 'pending' | 'completed' | 'failed'
+  //   transcript_sid    — Twilio Intelligence Transcript SID (GTxxxxxxxx)
+  if (!existing.has('kind')) {
+    db.exec("ALTER TABLE rvm_recordings ADD COLUMN kind TEXT NOT NULL DEFAULT 'rvm'");
+  }
+  if (!existing.has('transcript')) {
+    db.exec('ALTER TABLE rvm_recordings ADD COLUMN transcript TEXT');
+  }
+  if (!existing.has('transcript_status')) {
+    db.exec('ALTER TABLE rvm_recordings ADD COLUMN transcript_status TEXT');
+  }
+  if (!existing.has('transcript_sid')) {
+    db.exec('ALTER TABLE rvm_recordings ADD COLUMN transcript_sid TEXT');
+  }
 }
 
 // ---------------------------------------------------------------------------
