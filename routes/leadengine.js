@@ -279,7 +279,7 @@ const insertLead = db.prepare(`
     agentName, agentPhone, agentEmail, agentCompany, isFsbo,
     keywords, sourceUrl, zpid, listingDescription, priceChanges,
     importDate, dateFound, grade,
-    lead_status, opened, called, imported_at, lead_source,
+    lead_status, opened, called, imported_at, lead_source, wholesale_fee,
     dnc, consent_sms, consent_rvm, texts, textStatus, rvm, rvmStatus,
     created_at, updated_at
   ) VALUES (
@@ -289,7 +289,7 @@ const insertLead = db.prepare(`
     @agentName, @agentPhone, @agentEmail, @agentCompany, @isFsbo,
     @keywords, @sourceUrl, @zpid, @listingDescription, @priceChanges,
     @importDate, @dateFound, @grade,
-    'NEW', 0, 0, @imported_at, @lead_source,
+    'NEW', 0, 0, @imported_at, @lead_source, 5000,
     0, 0, 0, @texts, @textStatus, @rvm, 0,
     @created_at, @updated_at
   )

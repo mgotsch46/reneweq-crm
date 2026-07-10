@@ -283,8 +283,9 @@ function buildContact(body, ownerId) {
     city: body.city || null,
     state: body.state || null,
     listingDescription: body.listingDescription || null,
-    // Wholesale workflow fields
-    wholesale_fee: toNum(body.wholesale_fee),
+    // Wholesale workflow fields — default new leads/contacts to a $5,000 est. fee
+    wholesale_fee: (body.wholesale_fee === undefined || body.wholesale_fee === null || body.wholesale_fee === '')
+      ? 5000 : toNum(body.wholesale_fee),
     lead_source: body.lead_source || null,
     offerAcceptedDate: body.offerAcceptedDate || null,
     archived: toBit(body.archived),
