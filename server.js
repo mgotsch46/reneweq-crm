@@ -116,7 +116,15 @@ app.use('/api', (err, req, res, next) => {
 // ---------------------------------------------------------------------------
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-app.use(express.static(PUBLIC_DIR));
+app.use(express.static(PUBLIC_DIR, {
+  setHeaders: function (res, filePath) {
+    // Never serve a stale app shell: force the browser / mobile WebView to
+    // revalidate JS/CSS/HTML every load so deploys appear on a normal refresh.
+    if (/\.(?:js|css|html)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+  },
+}));
 
 const PLACEHOLDER_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Wholesale CRM</title></head>
@@ -128,6 +136,7 @@ const PLACEHOLDER_HTML = `<!doctype html>
 // SPA fallback: any non-/api GET → index.html if present, else placeholder.
 app.get('*', (req, res) => {
   const index = path.join(PUBLIC_DIR, 'index.html');
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   if (fs.existsSync(index)) return res.sendFile(index);
   res.status(200).type('html').send(PLACEHOLDER_HTML);
 });
