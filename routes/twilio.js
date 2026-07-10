@@ -37,6 +37,17 @@ const API_KEY_SECRET = () => process.env.TWILIO_API_KEY_SECRET || '';
 const TWIML_APP_SID = () => process.env.TWILIO_TWIML_APP_SID || '';
 const FROM_NUMBER = () => process.env.TWILIO_FROM || process.env.TWILIO_FROM_NUMBER || '';
 
+// --- Call recording + transcription -----------------------------------------
+// Record every call by default; set TWILIO_RECORD_CALLS=false to disable.
+const RECORD_CALLS = () => String(process.env.TWILIO_RECORD_CALLS || 'true').toLowerCase() !== 'false';
+// Consent announcement to the OTHER party is OFF by default (Marisa's choice);
+// set TWILIO_RECORDING_ANNOUNCEMENT=on to play "this call may be recorded".
+const RECORDING_ANNOUNCE = () => String(process.env.TWILIO_RECORDING_ANNOUNCEMENT || '').toLowerCase() === 'on';
+const RECORDING_ANNOUNCE_TEXT = () =>
+  process.env.TWILIO_RECORDING_ANNOUNCE_TEXT || 'This call may be recorded for quality and training purposes.';
+// Twilio Voice Intelligence service that produces transcripts from recordings.
+const INTELLIGENCE_SERVICE_SID = () => process.env.TWILIO_INTELLIGENCE_SERVICE_SID || '';
+
 /** Voice (softphone) is usable only with an API key + TwiML app. */
 function voiceConfigured() {
   return Boolean(ACCOUNT_SID() && API_KEY_SID() && API_KEY_SECRET() && TWIML_APP_SID());
@@ -212,6 +223,61 @@ function findContactByPhone(num) {
   return null;
 }
 
+/**
+ * Build the `record=...` + recordingStatusCallback attributes for a <Dial>.
+ * Returns '' when recording is disabled. `query` carries the mapping data
+ * (direction, agent user id, the other party's number) so the async recording
+ * callback can attach the audio to the right contact + user.
+ */
+function recordingAttrs(query) {
+  if (!RECORD_CALLS()) return '';
+  const cb = appBaseUrl() + '/api/twilio/recording?' + new URLSearchParams(query).toString();
+  return ' record="record-from-answer-dual"' +
+    ' recordingStatusCallback="' + xmlEscape(cb) + '"' +
+    ' recordingStatusCallbackMethod="POST"' +
+    ' recordingStatusCallbackEvent="completed"';
+}
+
+/** POST helper for the Twilio Voice Intelligence API (different host). */
+async function intelligenceRest(method, urlPath, form) {
+  const sid = ACCOUNT_SID();
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) throw new Error('Twilio account is not configured');
+  const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+  const opts = { method, headers: { Authorization: `Basic ${auth}` } };
+  if (form) {
+    opts.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    opts.body = new URLSearchParams(form).toString();
+  }
+  const r = await fetch('https://intelligence.twilio.com' + urlPath, opts);
+  const text = await r.text();
+  let json = null; try { json = JSON.parse(text); } catch (e) {}
+  if (!r.ok) throw new Error((json && json.message) || ('Twilio Intelligence error ' + r.status));
+  return json;
+}
+
+/**
+ * Kick off a Voice Intelligence transcript for a finished recording and stamp
+ * the transcript SID onto the recording row (so the completion webhook can find
+ * it). Best-effort: does nothing if no Intelligence service is configured.
+ */
+async function startTranscription(recordingSid, recRowId) {
+  if (!INTELLIGENCE_SERVICE_SID() || !recordingSid) return;
+  try {
+    const j = await intelligenceRest('POST', '/v2/Transcripts', {
+      ServiceSid: INTELLIGENCE_SERVICE_SID(),
+      Channel: JSON.stringify({ media_properties: { source_sid: recordingSid } }),
+    });
+    if (j && j.sid) {
+      db.prepare("UPDATE rvm_recordings SET transcript_sid = ?, transcript_status = 'pending' WHERE id = ?")
+        .run(j.sid, recRowId);
+    }
+  } catch (e) {
+    console.error('[twilio] startTranscription failed:', e.message);
+    try { db.prepare("UPDATE rvm_recordings SET transcript_status = 'failed' WHERE id = ?").run(recRowId); } catch (e2) {}
+  }
+}
+
 /** Log an activity row directly (used by inbound webhooks). */
 function logActivity({ contactId, ownerId, type, direction, body, status, providerId, createdBy }) {
   db.prepare(`
@@ -369,9 +435,28 @@ router.post('/voice', (req, res) => {
   // Use the CALLING user's own number as caller ID (falls back to the shared one).
   const callerUserId = userIdFromCaller((req.body && req.body.Caller) || (req.query && req.query.Caller) || '');
   const from = xmlEscape(userNumber(callerUserId) || FROM_NUMBER());
+  // Record the whole call (both channels) and hand the audio to /recording.
+  const recAttrs = recordingAttrs({ dir: 'outbound', uid: callerUserId || '', peer: to });
+  // Optional consent announcement played to the CALLED party before bridging.
+  const announce = RECORDING_ANNOUNCE()
+    ? ' url="' + xmlEscape(appBaseUrl() + '/api/twilio/announce') + '"'
+    : '';
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    `<Response><Dial callerId="${from}" answerOnBridge="true"><Number>${xmlEscape(to)}</Number></Dial></Response>`
+    `<Response><Dial callerId="${from}" answerOnBridge="true"${recAttrs}><Number${announce}>${xmlEscape(to)}</Number></Dial></Response>`
+  );
+});
+
+/**
+ * POST/GET /api/twilio/announce — TwiML played to the CALLED party (via the
+ * <Number url="...">) when the recording announcement is enabled. It speaks the
+ * notice, then returns so the call bridges normally.
+ */
+router.all('/announce', (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  res.send(
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Response><Say voice="alice">' + xmlEscape(RECORDING_ANNOUNCE_TEXT()) + '</Say></Response>'
   );
 });
 
@@ -401,9 +486,17 @@ router.post('/voice-inbound', (req, res) => {
   // Ring the browser client; if it isn't answered, `action` drops to voicemail.
   // Pass the rung user's id so the fallback plays THAT user's greeting.
   const fbAction = '/api/twilio/voice-inbound-fallback?u=' + encodeURIComponent(targetUserId);
+  // Record the answered call; map it to the caller's contact + the rung user.
+  const caller = (req.body && (req.body.From || req.body.Caller)) || '';
+  const recAttrs = recordingAttrs({ dir: 'inbound', uid: targetUserId, peer: caller });
+  // Optional consent notice played to the CALLER before the agent connects.
+  const notice = RECORDING_ANNOUNCE()
+    ? '<Say voice="alice">' + xmlEscape(RECORDING_ANNOUNCE_TEXT()) + '</Say>'
+    : '';
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    `<Response><Dial answerOnBridge="true" timeout="25" action="${xmlEscape(fbAction)}" method="POST"><Client>${identity}</Client></Dial></Response>`
+    '<Response>' + notice +
+    `<Dial answerOnBridge="true" timeout="25" action="${xmlEscape(fbAction)}" method="POST"${recAttrs}><Client>${identity}</Client></Dial></Response>`
   );
 });
 
@@ -532,6 +625,122 @@ router.post('/voicemail-transcribe', (req, res) => {
   } catch (e) { console.error('[twilio] transcribe callback error:', e.message); }
   res.set('Content-Type', 'text/xml');
   res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+});
+
+/**
+ * POST /api/twilio/recording — recordingStatusCallback for two-party CALL
+ * recordings (fired when a Dial recording completes). Downloads the dual-channel
+ * MP3, stores it, logs/attaches it to the matching contact's call in the
+ * Activity Log, and kicks off async transcription. Query params (dir/uid/peer)
+ * were added when we built the <Dial>; body carries the Recording* fields.
+ */
+router.post('/recording', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const q = req.query || {};
+    const dir = q.dir === 'inbound' ? 'inbound' : 'outbound';
+    const agentUserId = q.uid || null;
+    const peer = q.peer || b.From || b.To || '';
+    const recUrl = b.RecordingUrl || '';
+    const recSid = b.RecordingSid || null;
+    const durSec = parseInt(b.RecordingDuration, 10) || null;
+    if (!recUrl) return res.status(200).end();
+
+    const contact = findContactByPhone(peer);
+    if (!contact) {
+      console.log('[twilio] call recording for unknown number:', peer);
+      return res.status(200).end();
+    }
+
+    // Download the recording MP3 from Twilio (Basic auth) and store on the volume.
+    let stored = null, size = null;
+    try {
+      const sid = ACCOUNT_SID();
+      const auth = Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+      const r = await fetch(recUrl + '.mp3', { headers: { Authorization: `Basic ${auth}` } });
+      if (r.ok) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        size = buf.length;
+        try { fs.mkdirSync(VM_DIR, { recursive: true }); } catch (e) {}
+        stored = (recSid || uid()) + '.mp3';
+        fs.writeFileSync(path.join(VM_DIR, stored), buf);
+      }
+    } catch (e) { console.error('[twilio] call recording download failed:', e.message); }
+    if (!stored) return res.status(200).end();
+
+    const recId = uid();
+    const willTranscribe = !!INTELLIGENCE_SERVICE_SID();
+    db.prepare(`INSERT INTO rvm_recordings (id, owner_id, contact_id, kind, label, stored, mime, size, duration_ms, direction, twilio_sid, transcript_status, created_by, created_at)
+      VALUES (@id,@owner_id,@contact_id,'call',@label,@stored,'audio/mpeg',@size,@dur,@dir,@sid,@tstatus,@created_by,@created_at)`).run({
+      id: recId, owner_id: contact.owner_id, contact_id: contact.id,
+      label: dir === 'inbound' ? 'Inbound call recording' : 'Call recording',
+      stored, size, dur: durSec ? durSec * 1000 : null, dir, sid: recSid,
+      tstatus: willTranscribe ? 'pending' : null,
+      created_by: agentUserId || contact.owner_id, created_at: now(),
+    });
+
+    // Attach to the call the frontend already logged (within the last 15 min);
+    // otherwise create a fresh call entry so the recording still shows up.
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const recent = db.prepare(
+      "SELECT id FROM activities WHERE contact_id = ? AND type = 'call' AND direction = ? AND (provider_id IS NULL OR provider_id = '') AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+    ).get(contact.id, dir, cutoff);
+    if (recent) {
+      db.prepare('UPDATE activities SET provider_id = ?, duration_sec = COALESCE(duration_sec, ?) WHERE id = ?')
+        .run(recId, durSec, recent.id);
+    } else {
+      db.prepare(`INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, provider_id, duration_sec, created_by, created_at)
+        VALUES (@id,@contact_id,@owner_id,'call','automated',@dir,@body,'completed',@provider_id,@dur,@created_by,@created_at)`).run({
+        id: uid(), contact_id: contact.id, owner_id: contact.owner_id, dir,
+        body: (dir === 'inbound' ? 'Inbound call' : 'Call') + ' recording',
+        provider_id: recId, dur: durSec, created_by: agentUserId || contact.owner_id, created_at: now(),
+      });
+    }
+    try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
+
+    if (willTranscribe) { startTranscription(recSid, recId).catch(function () {}); }
+  } catch (e) {
+    console.error('[twilio] recording handler error:', e.message);
+  }
+  res.status(200).end();
+});
+
+/**
+ * POST /api/twilio/intelligence-callback — the Voice Intelligence service's
+ * status webhook (configure it on the VI Service). When a transcript is ready
+ * we pull its sentences, stitch a two-speaker transcript, save it on the
+ * recording, and surface a snippet on the linked call activity.
+ */
+router.post('/intelligence-callback', async (req, res) => {
+  res.status(200).end(); // ack immediately
+  try {
+    const b = req.body || {};
+    const tsid = b.transcript_sid || b.TranscriptSid || null;
+    const status = String(b.status || b.Status || '').toLowerCase();
+    const evt = String(b.event_type || b.EventType || '').toLowerCase();
+    if (!tsid) return;
+    const rec = db.prepare('SELECT id FROM rvm_recordings WHERE transcript_sid = ?').get(tsid);
+    if (!rec) return;
+    if (status === 'failed' || evt.indexOf('fail') !== -1) {
+      db.prepare("UPDATE rvm_recordings SET transcript_status = 'failed' WHERE id = ?").run(rec.id);
+      return;
+    }
+    // Pull the sentences (channel 1 = agent's leg, channel 2 = the other party).
+    const j = await intelligenceRest('GET', '/v2/Transcripts/' + encodeURIComponent(tsid) + '/Sentences?PageSize=1000');
+    const sentences = (j && j.sentences) || [];
+    if (!sentences.length) return;
+    const text = sentences.map(function (s) {
+      const who = String(s.media_channel) === '2' ? 'Them' : 'Agent';
+      return who + ': ' + (s.transcript || '');
+    }).join('\n');
+    db.prepare("UPDATE rvm_recordings SET transcript = ?, transcript_status = 'completed' WHERE id = ?").run(text, rec.id);
+    const act = db.prepare("SELECT id FROM activities WHERE provider_id = ? AND type = 'call' ORDER BY created_at DESC LIMIT 1").get(rec.id);
+    if (act) {
+      const snippet = text.slice(0, 140).replace(/\s+/g, ' ');
+      db.prepare('UPDATE activities SET body = ? WHERE id = ?')
+        .run('Call recording — "' + snippet + (text.length > 140 ? '…' : '') + '"', act.id);
+    }
+  } catch (e) { console.error('[twilio] intelligence-callback error:', e.message); }
 });
 
 /**

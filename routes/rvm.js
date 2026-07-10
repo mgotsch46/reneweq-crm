@@ -256,6 +256,13 @@ router.get('/rvm/recordings/:recId/audio', requireAuth, (req, res) => {
   streamRec(r, res);
 });
 
+/** GET /api/rvm/recordings/:recId/transcript — call transcript text + status (auth). */
+router.get('/rvm/recordings/:recId/transcript', requireAuth, (req, res) => {
+  const r = recFor(req.params.recId, req.user);
+  if (!r) return res.status(404).json({ error: 'Recording not found' });
+  res.json({ transcript: r.transcript || null, status: r.transcript_status || null });
+});
+
 /** GET /api/rvm/recordings/:recId/public — provider fetch (NO auth; random id). */
 router.get('/rvm/recordings/:recId/public', (req, res) => {
   const r = recFor(req.params.recId, null);
