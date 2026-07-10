@@ -330,7 +330,7 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_contacts_zpid ON contacts(zpid)');
 // ---------------------------------------------------------------------------
 
 const LEAD_STATUS_COLUMNS = [
-  ['lead_status', 'TEXT'],                       // 'NEW' | 'IN QUEUE' | 'WORKING'
+  ['lead_status', 'TEXT'],                       // 'NEW' | 'IN QUEUE' | 'WORKING' | 'Contacted — Left VM' | 'Contacted — Had Conversation'
   ['opened', 'INTEGER NOT NULL DEFAULT 0'],
   ['opened_at', 'TEXT'],
   ['called', 'INTEGER NOT NULL DEFAULT 0'],
@@ -483,6 +483,30 @@ const WHOLESALE_COLUMNS = [
     db.prepare('PRAGMA table_info(contacts)').all().map((col) => col.name)
   );
   for (const [name, type] of WHOLESALE_COLUMNS) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE contacts ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent migration — deal price columns on `contacts` (same pattern as
+// the blocks above). "List Price" reuses the existing `price` column (added
+// in LEAD_ENGINE_COLUMNS); these two are the rest of the negotiation trail:
+//   offerPrice — the price we offered on the property ($)
+//   finalPrice — the final negotiated price ($)
+// ---------------------------------------------------------------------------
+
+const PRICE_COLUMNS = [
+  ['offerPrice', 'REAL'],
+  ['finalPrice', 'REAL'],
+];
+
+{
+  const existing = new Set(
+    db.prepare('PRAGMA table_info(contacts)').all().map((col) => col.name)
+  );
+  for (const [name, type] of PRICE_COLUMNS) {
     if (!existing.has(name)) {
       db.exec(`ALTER TABLE contacts ADD COLUMN ${name} ${type}`);
     }
