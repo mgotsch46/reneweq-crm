@@ -15,6 +15,8 @@ let STAGES = [
 const DEAD_STAGE = 'Dead Deal';
 let LEAD_SOURCES = ['Manual Upload', 'Zillow', 'Referral', 'Email Campaign', 'Custom'];
 let DEAD_REASONS = ['Did not accept offer', 'Sold', 'Other'];
+// Lead triage statuses (keep in sync with LEAD_STATUSES in routes/contacts.js).
+const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING', 'Contacted — Left VM', 'Contacted — Had Conversation'];
 const TIMEZONES = [
   ['America/New_York', 'Eastern (New York)'],
   ['America/Chicago', 'Central (Chicago)'],
@@ -1163,28 +1165,30 @@ function pipelineActive() {
   return state.contacts.filter(function (c) { return (c.stage || STAGES[0]) !== DEAD_STAGE; });
 }
 
-/** Vertical process timeline showing where a deal sits in the workflow.
- *  Done stages get a filled check, the current stage a highlighted ring,
- *  upcoming stages a muted dot. Used inside the contact modal. */
+/** Horizontal process timeline showing where a deal sits in the workflow.
+ *  Stages run LEFT-TO-RIGHT: done stages get a filled check, the current
+ *  stage a highlighted ring, upcoming stages a muted dot. Connector lines
+ *  join the dots; the row scrolls horizontally on narrow screens.
+ *  Used inside the contact modal. */
 function pipelineTimelineHtml(stage) {
   const stages = pipelineStages();
   const ci = stages.indexOf(stage);
   let steps = '';
   stages.forEach(function (s, i) {
     const done = i < ci, now = i === ci;
-    const dotBg = done ? 'var(--accent)' : (now ? 'rgba(239,68,68,.22)' : 'rgba(255,255,255,.06)');
-    const dotBd = now ? '2px solid var(--accent)' : '1px solid var(--line)';
-    const line = i < stages.length - 1
-      ? '<span style="position:absolute;left:9px;top:20px;width:2px;height:calc(100% - 4px);background:' + (i < ci ? 'var(--accent)' : 'var(--line-soft)') + ';"></span>'
-      : '';
-    const txt = (done || now) ? 'var(--text)' : 'var(--muted)';
-    steps += '<div style="position:relative;display:flex;align-items:center;gap:12px;padding:4px 0;min-height:24px;">' +
-      line +
-      '<span style="position:relative;z-index:1;width:20px;height:20px;border-radius:50%;background:' + dotBg + ';border:' + dotBd + ';display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-size:12px;color:#fff;">' + (done ? '✓' : '') + '</span>' +
-      '<span style="font-size:' + (now ? '14px' : '13px') + ';font-weight:' + (now ? '700' : '400') + ';color:' + txt + ';">' + esc(s) + (now ? '  ·  current' : '') + '</span>' +
+    const cls = done ? ' done' : (now ? ' now' : '');
+    // Left connector joins to the previous stage, right connector to the next;
+    // a connector is "done" (filled) when both of its endpoints are reached.
+    const lLine = '<span class="ptl-line' + (i === 0 ? ' none' : (i <= ci ? ' done' : '')) + '"></span>';
+    const rLine = '<span class="ptl-line' + (i === stages.length - 1 ? ' none' : (i < ci ? ' done' : '')) + '"></span>';
+    steps += '<div class="ptl-step' + cls + '">' +
+      '<div class="ptl-track">' + lLine +
+      '<span class="ptl-dot">' + (done ? '✓' : '') + '</span>' +
+      rLine + '</div>' +
+      '<span class="ptl-label">' + esc(s) + (now ? '<span class="ptl-cur">current</span>' : '') + '</span>' +
       '</div>';
   });
-  return '<div class="sec"><h4>Deal progress</h4><div style="margin-top:6px">' + steps + '</div></div>';
+  return '<div class="sec"><h4>Deal progress</h4><div class="ptl">' + steps + '</div></div>';
 }
 
 /** Comparator for the pipeline sort dropdown. */
@@ -1453,7 +1457,7 @@ function renderContacts() {
     '  </select>' +
     '  <select class="search sm" id="fStatus">' +
     '    <option value=""' + (f.leadStatus === '' ? ' selected' : '') + '>All statuses</option>' +
-    ['NEW', 'IN QUEUE', 'WORKING'].map(function (st) {
+    LEAD_STATUSES.map(function (st) {
       return '<option value="' + escAttr(st) + '"' + (f.leadStatus === st ? ' selected' : '') + '>' + esc(st) + '</option>';
     }).join('') +
     '  </select>' +
@@ -1899,7 +1903,10 @@ function openContactModal(contact, leadDraft) {
 
   let html = '<div class="overlay" id="contactOverlay"><div class="modal">' +
     '<div class="mhead"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
-    '<button class="close" id="cmClose" title="Close">&times;</button></div>' +
+    '<div class="mhead-actions">' +
+    '<button class="btn small" id="cmSaveTop" title="Save (same as the Save button at the bottom)">Save</button>' +
+    '<button class="close" id="cmClose" title="Close">&times;</button>' +
+    '</div></div>' +
     '<div class="mbody">';
 
   // ---- Admin bar: assign-to-user + Keep-as-NEW pin (always near the top)
@@ -1921,7 +1928,7 @@ function openContactModal(contact, leadDraft) {
       '<div class="field" style="margin:0"><label>Lead status</label>' +
       '<select id="leadStatusSel" style="min-width:150px">' +
       '<option value=""' + (!cur ? ' selected' : '') + '>— none —</option>' +
-      ['NEW', 'IN QUEUE', 'WORKING'].map(function (s) {
+      LEAD_STATUSES.map(function (s) {
         return '<option value="' + escAttr(s) + '"' + (cur === s ? ' selected' : '') + '>' + esc(s) + '</option>';
       }).join('') +
       '</select></div>' +
@@ -1944,7 +1951,7 @@ function openContactModal(contact, leadDraft) {
   const ctName = c.name || (ctFsbo ? c.sellerName : c.agentName) || '';
   const ctPhone = c.phone || (ctFsbo ? c.fsboPhone : c.agentPhone) || '';
   const ctEmail = c.email || (ctFsbo ? c.fsboEmail : c.agentEmail) || '';
-  html += '<div class="sec" style="margin-top:0"><h4>Details</h4><div class="grid2">';
+  html += '<div class="sec" style="margin-top:0"><h4>Details</h4><div class="grid3">';
   html += fieldHtml({ key: 'name', label: 'Contact Name' }, ctName);
   html += '<div class="field"><label>Contact Type</label><select data-field="contact_type" id="contactTypeSel">' +
     '<option value="agent"' + (ctType === 'agent' ? ' selected' : '') + '>Listing Agent</option>' +
@@ -1966,7 +1973,7 @@ function openContactModal(contact, leadDraft) {
     '<datalist id="leadSrcList">' + LEAD_SOURCES.map(function (s) { return '<option value="' + escAttr(s) + '">'; }).join('') + '</datalist>' +
     '</div>';
   html += '</div>' +
-    '<div class="field" style="margin-top:14px"><label>Notes</label>' +
+    '<div class="field" style="margin-top:10px"><label>Notes</label>' +
     '<textarea data-field="notes" rows="3">' + esc(c.notes || '') + '</textarea></div>' +
     (c.grade ? '<p class="hint" style="margin:10px 0 0">Lead grade: ' + gradeBadge(c) +
       (c.price !== null && c.price !== undefined && c.price !== '' ? ' &middot; Listed at $' + Number(c.price).toLocaleString() : '') +
@@ -2003,14 +2010,20 @@ function openContactModal(contact, leadDraft) {
     numFieldHtml('beds', 'Beds', c.beds) +
     numFieldHtml('baths', 'Baths', c.baths) +
     numFieldHtml('sqft', 'Sqft', c.sqft) +
-    '</div><div class="grid3" style="margin-top:14px">' +
+    '</div><div class="grid3" style="margin-top:10px">' +
     fieldHtml({ key: 'city', label: 'City' }, c.city || '') +
     fieldHtml({ key: 'state', label: 'State' }, c.state || '') +
     numFieldHtml('daysOnMarket', 'Days on Market', c.daysOnMarket) +
-    '</div><div class="grid2" style="margin-top:14px">' +
+    // Deal pricing: List Price reuses the existing `price` column ("Listed at $…");
+    // offerPrice / finalPrice are new REAL columns (db.js + routes/contacts.js).
+    '</div><div class="grid3" style="margin-top:10px">' +
+    numFieldHtml('price', 'List Price ($)', c.price) +
+    numFieldHtml('offerPrice', 'Offer Price ($)', c.offerPrice) +
+    numFieldHtml('finalPrice', 'Final Negotiated Price ($)', c.finalPrice) +
+    '</div><div class="grid2" style="margin-top:10px">' +
     fieldHtml({ key: 'propertyTax', label: 'Property Tax ($/yr)' }, c.propertyTax || '') +
     fieldHtml({ key: 'priceChanges', label: 'Price Changes' }, c.priceChanges || '') +
-    '</div><div class="grid2" style="margin-top:14px">' +
+    '</div><div class="grid2" style="margin-top:10px">' +
     '<div class="field"><label>Photo URL</label>' +
     '<input type="url" data-field="photoUrl" value="' + escAttr(c.photoUrl || '') + '">' +
     (c.photoUrl
@@ -2025,9 +2038,9 @@ function openContactModal(contact, leadDraft) {
       : '') +
     '</div>' +
     '</div>' +
-    '<div class="field" style="margin-top:14px"><label>Keywords (comma separated)</label>' +
+    '<div class="field" style="margin-top:10px"><label>Keywords (comma separated)</label>' +
     '<input type="text" data-field="keywords" value="' + escAttr(keywordsVal(c.keywords)) + '"></div>' +
-    '<div class="field" style="margin-top:14px"><label>Listing Description (pasted text)</label>' +
+    '<div class="field" style="margin-top:10px"><label>Listing Description (pasted text)</label>' +
     '<textarea data-field="listingDescription" rows="4">' + esc(c.listingDescription || '') + '</textarea></div>' +
     '</div>';
 
@@ -2036,11 +2049,26 @@ function openContactModal(contact, leadDraft) {
   //  Details above.)
 
   // ---- Dates (Offer Accepted date auto-fills when the stage hits Offer Accepted)
-  html += '<div class="sec"><h4>Important Dates</h4><div class="grid2">';
+  html += '<div class="sec"><h4>Important Dates</h4><div class="grid3">';
   html += '<div class="field"><label>Offer Accepted Date</label>' +
     '<input type="date" data-field="offerAcceptedDate" value="' + escAttr(dateInputVal(c.offerAcceptedDate)) + '"></div>';
   DATE_FIELDS.forEach(function (f) { html += fieldHtml(f, dateInputVal(c[f.key]), 'date'); });
   html += '</div><p class="hint" style="margin:8px 0 0">Moving the stage to “Offer Accepted” auto-fills the accepted date if it’s blank.</p></div>';
+
+  // ---- Tasks (linked to this contact) — kept directly under Important Dates
+  html += '<div class="sec"><h4>Tasks</h4>' +
+    (isNew
+      ? '<p class="hint">Save the contact first to add tasks for it.</p>'
+      : '<p class="hint" style="margin:0 0 10px">Tasks you add here are linked to this contact and also appear in your main Tasks list.</p>' +
+        '<div class="taskform">' +
+        '  <div class="field" style="flex:2"><label>New task</label><input id="ctTaskTitle" type="text" placeholder="e.g. Follow up with seller"></div>' +
+        '  <div class="field"><label>Due date</label><input id="ctTaskDue" type="date"></div>' +
+        '  <div class="field"><label>Time (optional)</label><input id="ctTaskTime" type="time"></div>' +
+        '  <div class="field"><label>Duration</label><select id="ctTaskDur">' + durationOptions(30) + '</select></div>' +
+        '  <button class="btn" id="ctTaskAdd" type="button">Add Task</button>' +
+        '</div>' +
+        '<div class="tasklist" id="contactTasks"><p class="hint">Loading tasks...</p></div>') +
+    '</div>';
 
   // ---- Dead Deal / archive outcome (used when the stage is "Dead Deal")
   {
@@ -2054,7 +2082,7 @@ function openContactModal(contact, leadDraft) {
       DEAD_REASONS.map(function (r) { return '<option value="' + escAttr(r) + '"' + (dr === r ? ' selected' : '') + '>' + esc(r) + '</option>'; }).join('') +
       '</select></div>' +
       '</div>' +
-      '<div class="field" style="margin-top:14px"><label>Notes</label>' +
+      '<div class="field" style="margin-top:10px"><label>Notes</label>' +
       '<textarea data-field="dead_notes" rows="3" placeholder="e.g. seller went with another buyer, wanted more than we could pay...">' + esc(c.dead_notes || '') + '</textarea></div>' +
       '</div>';
   }
@@ -2157,21 +2185,6 @@ function openContactModal(contact, leadDraft) {
         '</div>' +
         '<div class="doclist" id="rvmScheduled"></div>' +
         (!canRvm ? '<p class="hint">Sending disabled: ' + (truthy(c.dnc) ? 'contact is marked DNC.' : 'RVM consent not granted — toggle SMS/RVM consent above and Save.') + '</p>' : '')) +
-    '</div>';
-
-  // ---- Tasks (linked to this contact)
-  html += '<div class="sec"><h4>Tasks</h4>' +
-    (isNew
-      ? '<p class="hint">Save the contact first to add tasks for it.</p>'
-      : '<p class="hint" style="margin:0 0 10px">Tasks you add here are linked to this contact and also appear in your main Tasks list.</p>' +
-        '<div class="taskform">' +
-        '  <div class="field" style="flex:2"><label>New task</label><input id="ctTaskTitle" type="text" placeholder="e.g. Follow up with seller"></div>' +
-        '  <div class="field"><label>Due date</label><input id="ctTaskDue" type="date"></div>' +
-        '  <div class="field"><label>Time (optional)</label><input id="ctTaskTime" type="time"></div>' +
-        '  <div class="field"><label>Duration</label><select id="ctTaskDur">' + durationOptions(30) + '</select></div>' +
-        '  <button class="btn" id="ctTaskAdd" type="button">Add Task</button>' +
-        '</div>' +
-        '<div class="tasklist" id="contactTasks"><p class="hint">Loading tasks...</p></div>') +
     '</div>';
 
   // ---- Documents (uploaded files for this contact)
@@ -2286,6 +2299,14 @@ function openContactModal(contact, leadDraft) {
       toastErr(e);
       btn.disabled = false;
     }
+  });
+
+  // ---- Sticky header Save: delegates to the SAME handler as the bottom
+  //      Save button (no duplicated save logic — it just clicks #cmSave).
+  const topSave = $('#cmSaveTop', overlay);
+  if (topSave) topSave.addEventListener('click', function () {
+    const b = $('#cmSave', overlay);
+    if (b && !b.disabled) b.click();
   });
 
   // ---- Delete
@@ -3839,12 +3860,18 @@ function renderTeam() {
    Sheet the USER published, or pasted CSV text). It never scrapes sites. */
 
 /* Lead Engine triage status badge: NEW (gold), IN QUEUE (blue/grey),
-   WORKING (muted). Rendered alongside the A-F grade badge. */
+   WORKING (muted), Contacted — Left VM / Had Conversation (green).
+   Rendered alongside the A-F grade badge. */
 function leadStatusBadge(c) {
-  const st = (c && c.lead_status ? String(c.lead_status) : '').trim().toUpperCase();
-  if (['NEW', 'IN QUEUE', 'WORKING'].indexOf(st) === -1) return '';
-  const cls = st === 'NEW' ? 'ls-new' : (st === 'IN QUEUE' ? 'ls-queue' : 'ls-working');
-  return '<span class="status-badge ' + cls + '" title="Lead status: ' + escAttr(st) + '">' + esc(st) + '</span>';
+  const raw = (c && c.lead_status ? String(c.lead_status) : '').trim();
+  const st = raw.toUpperCase();
+  let cls = '';
+  if (st === 'NEW') cls = 'ls-new';
+  else if (st === 'IN QUEUE') cls = 'ls-queue';
+  else if (st === 'WORKING') cls = 'ls-working';
+  else if (st.indexOf('CONTACTED') === 0) cls = 'ls-contacted';
+  if (!cls) return '';
+  return '<span class="status-badge ' + cls + '" title="Lead status: ' + escAttr(raw) + '">' + esc(raw) + '</span>';
 }
 
 function gradeBadge(c) {
@@ -4179,7 +4206,7 @@ async function renderMyNumberBox() {
 
   // Admin: show the whole pool and who owns each, with release controls.
   if (isAdmin && nums.length) {
-    html += '<div style="margin-top:14px"><b style="font-size:13px">All account numbers</b>' +
+    html += '<div style="margin-top:10px"><b style="font-size:13px">All account numbers</b>' +
       '<table class="gtable" style="margin-top:6px"><thead><tr><th>Number</th><th>Assigned to</th><th></th></tr></thead><tbody>' +
       nums.map(function (n) {
         const who = n.claimedBy ? esc(n.claimedBy.name) : '<span class="hint">— available —</span>';
