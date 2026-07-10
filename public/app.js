@@ -1907,7 +1907,9 @@ function openContactModal(contact, leadDraft) {
   const canRvm = !truthy(c.dnc) && truthy(c.consent_rvm);
 
   let html = '<div class="overlay" id="contactOverlay"><div class="modal">' +
-    '<div class="mhead"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
+    '<div class="mhead"><div class="mhead-titles"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
+    (c.property ? '<div class="mhead-sub"><span class="mhs-ico">▢</span> ' + esc(c.property) + '</div>' : '') +
+    '</div>' +
     '<button class="close" id="cmClose" title="Close">&times;</button>' +
     '</div>' +
     '<div class="mbody">';
