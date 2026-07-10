@@ -37,7 +37,7 @@ const CONTACT_FIELDS = [
 ];
 
 /** Lead Engine triage statuses. */
-const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING', 'Contacted — Left VM', 'Contacted — Had Conversation'];
+const LEAD_STATUSES = ['NEW', 'IN QUEUE', 'WORKING'];
 
 const NUMERIC_FIELDS = ['beds', 'baths', 'sqft', 'daysOnMarket', 'price', 'wholesale_fee', 'offerPrice', 'finalPrice'];
 const BOOL_FIELDS = ['dnc', 'consent_sms', 'consent_rvm', 'rvmStatus', 'isFsbo', 'status_locked', 'archived'];
