@@ -21,6 +21,8 @@ const bcrypt = require('bcryptjs');
 const STAGES = [
   'New',
   'Contacted',
+  'Contacted - Left VM',
+  'Contacted - Had Conversation',
   'Qualified',
   'Offer Sent',
   'Negotiation',
