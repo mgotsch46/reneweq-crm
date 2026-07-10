@@ -21,8 +21,6 @@ const bcrypt = require('bcryptjs');
 const STAGES = [
   'New',
   'Contacted',
-  'Contacted - Left VM',
-  'Contacted - Had Conversation',
   'Qualified',
   'Offer Sent',
   'Negotiation',
@@ -50,6 +48,8 @@ const STAGE_REMAP = {
   'Prospect': 'New',
   'Offer Delivered': 'Offer Sent',
   'Property Analyzer Run': 'Property Analyzer',
+  'Contacted - Left VM': 'Contacted',
+  'Contacted - Had Conversation': 'Contacted',
   // Offer Accepted, BOG Walk Through, EMD Sent, Dispo, Assigned, Closed keep their names.
 };
 
