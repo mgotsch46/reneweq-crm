@@ -2023,6 +2023,7 @@ function openContactModal(contact, leadDraft) {
     // offerPrice / finalPrice are new REAL columns (db.js + routes/contacts.js).
     '</div><div class="grid3" style="margin-top:10px">' +
     numFieldHtml('price', 'List Price ($)', c.price) +
+    numFieldHtml('suggestedOffer', 'Suggested Offer Price ($)', c.suggestedOffer) +
     numFieldHtml('offerPrice', 'Offer Price ($)', c.offerPrice) +
     numFieldHtml('finalPrice', 'Final Negotiated Price ($)', c.finalPrice) +
     '</div><div class="grid2" style="margin-top:10px">' +
