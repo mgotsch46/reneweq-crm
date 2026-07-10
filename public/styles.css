@@ -187,7 +187,7 @@ select.search option{background:var(--panel);color:var(--text)}
 .pcard .nm{font-weight:700}
 .pcard .pr{color:var(--muted);font-size:12px;margin-top:3px}
 .pcard .meta{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-.tag{font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(16,185,129,.14);color:#6ee7b7;border:1px solid rgba(16,185,129,.32)}
+.tag{display:inline-block;white-space:nowrap;vertical-align:middle;font-size:11px;padding:2px 8px;border-radius:999px;background:rgba(16,185,129,.14);color:#6ee7b7;border:1px solid rgba(16,185,129,.32)}
 .tag.blue{background:rgba(56,189,248,.13);color:#7dd3fc;border-color:rgba(56,189,248,.32)}
 .tag.warn{background:rgba(251,191,36,.13);color:#fcd34d;border-color:rgba(251,191,36,.32)}
 .tag.grey{background:rgba(255,255,255,.06);color:var(--muted);border-color:var(--line)}

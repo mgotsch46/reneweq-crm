@@ -1952,7 +1952,7 @@ function openContactModal(contact, leadDraft) {
   // Legacy records (saved before this change) prefill from the old
   // seller/agent sub-fields when the primary columns are empty.
   const ctFsbo = truthy(c.isFsbo);
-  const ctType = ctFsbo ? 'fsbo' : 'agent';
+  const ctType = c.contact_type || (ctFsbo ? 'fsbo' : 'agent');
   const ctName = c.name || (ctFsbo ? c.sellerName : c.agentName) || '';
   const ctPhone = c.phone || (ctFsbo ? c.fsboPhone : c.agentPhone) || '';
   const ctEmail = c.email || (ctFsbo ? c.fsboEmail : c.agentEmail) || '';
@@ -1961,6 +1961,9 @@ function openContactModal(contact, leadDraft) {
   html += '<div class="field"><label>Contact Type</label><select data-field="contact_type" id="contactTypeSel">' +
     '<option value="agent"' + (ctType === 'agent' ? ' selected' : '') + '>Listing Agent</option>' +
     '<option value="fsbo"' + (ctType === 'fsbo' ? ' selected' : '') + '>FSBO Seller</option>' +
+    '<option value="colleague"' + (ctType === 'colleague' ? ' selected' : '') + '>Colleague</option>' +
+    '<option value="title"' + (ctType === 'title' ? ' selected' : '') + '>Title</option>' +
+    '<option value="bog"' + (ctType === 'bog' ? ' selected' : '') + '>BOG</option>' +
     '</select></div>';
   html += fieldHtml({ key: 'phone', label: 'Contact Phone' }, ctPhone);
   html += fieldHtml({ key: 'email', label: 'Contact Email' }, ctEmail);
