@@ -34,6 +34,8 @@ const CONTACT_FIELDS = [
   'dead_reason', 'dead_notes',
   // Deal price fields (List Price reuses `price` above)
   'offerPrice', 'finalPrice', 'suggestedOffer',
+  // Contact classification (agent / fsbo / colleague / title / bog)
+  'contact_type',
 ];
 
 /** Lead Engine triage statuses. */
@@ -296,6 +298,7 @@ function buildContact(body, ownerId) {
     offerPrice: toNum(body.offerPrice),
     finalPrice: toNum(body.finalPrice),
     suggestedOffer: toNum(body.suggestedOffer),
+    contact_type: body.contact_type || null,
     created_at: ts,
     updated_at: ts,
   };
@@ -312,7 +315,7 @@ function insertContactRow(contact) {
       daysOnMarket, priceChanges, propertyTax, photoUrl, sourceUrl, keywords,
       city, state, listingDescription,
       wholesale_fee, lead_source, offerAcceptedDate, archived, dead_reason, dead_notes,
-      price, offerPrice, finalPrice, suggestedOffer,
+      price, offerPrice, finalPrice, suggestedOffer, contact_type,
       created_at, updated_at
     ) VALUES (
       @id, @owner_id, @name, @email, @phone, @property, @zillow,
@@ -323,7 +326,7 @@ function insertContactRow(contact) {
       @daysOnMarket, @priceChanges, @propertyTax, @photoUrl, @sourceUrl, @keywords,
       @city, @state, @listingDescription,
       @wholesale_fee, @lead_source, @offerAcceptedDate, @archived, @dead_reason, @dead_notes,
-      @price, @offerPrice, @finalPrice, @suggestedOffer,
+      @price, @offerPrice, @finalPrice, @suggestedOffer, @contact_type,
       @created_at, @updated_at
     )
   `).run(contact);

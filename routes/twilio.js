@@ -493,10 +493,66 @@ router.post('/voice', (req, res) => {
   const announce = RECORDING_ANNOUNCE()
     ? ' url="' + xmlEscape(appBaseUrl() + '/api/twilio/announce') + '"'
     : '';
+  // After the Dial ends, Twilio POSTs DialCallStatus here so we can log an
+  // outbound "Call attempted" entry when the called party didn't answer.
+  const statusAction = xmlEscape(
+    '/api/twilio/voice-status?peer=' + encodeURIComponent(to) +
+    '&u=' + encodeURIComponent(callerUserId || '')
+  );
   res.send(
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    `<Response><Dial callerId="${from}" answerOnBridge="true"${recAttrs}><Number${announce}>${xmlEscape(to)}</Number></Dial></Response>`
+    `<Response><Dial callerId="${from}" answerOnBridge="true" action="${statusAction}" method="POST"${recAttrs}><Number${announce}>${xmlEscape(to)}</Number></Dial></Response>`
   );
+});
+
+/**
+ * POST /api/twilio/voice-status — the outbound <Dial> `action`. Fires after the
+ * call ends with DialCallStatus. If the called party did NOT answer
+ * (no-answer / busy / failed / canceled), we log a "Call attempted" entry to
+ * the matching contact's Activity Log so the outreach still shows in history.
+ * Answered calls are handled by /recording, so we skip them here.
+ */
+router.post('/voice-status', (req, res) => {
+  res.set('Content-Type', 'text/xml');
+  try {
+    const b = req.body || {};
+    const q = req.query || {};
+    const status = String(b.DialCallStatus || '').toLowerCase();
+    const peer = q.peer || b.To || '';
+    const agentUserId = q.u || null;
+    // Only log the missed/unanswered cases; 'answered'/'completed' get a
+    // recording entry via /recording instead.
+    const missed = ['no-answer', 'busy', 'failed', 'canceled'];
+    if (missed.indexOf(status) !== -1) {
+      const contact = findContactByPhone(peer);
+      if (contact) {
+        const label = status === 'busy' ? 'Call attempted — line busy'
+          : status === 'no-answer' ? 'Call attempted — no answer'
+          : 'Call attempted — not connected';
+        // The browser logs every outbound call as 'completed' on disconnect —
+        // even when the callee never answered. Reconcile that recent entry to
+        // "Call attempted" (no recording attached) instead of duplicating it.
+        const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+        const recent = db.prepare(
+          "SELECT id FROM activities WHERE contact_id = ? AND type = 'call' AND direction = 'outbound' AND (provider_id IS NULL OR provider_id = '') AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+        ).get(contact.id, cutoff);
+        if (recent) {
+          db.prepare("UPDATE activities SET body = ?, status = 'no-answer', duration_sec = NULL WHERE id = ?")
+            .run(label, recent.id);
+        } else {
+          db.prepare(`INSERT INTO activities (id, contact_id, owner_id, type, mode, direction, body, status, created_by, created_at)
+            VALUES (@id,@contact_id,@owner_id,'call','automated','outbound',@body,'no-answer',@created_by,@created_at)`).run({
+            id: uid(), contact_id: contact.id, owner_id: contact.owner_id,
+            body: label, created_by: agentUserId || contact.owner_id, created_at: now(),
+          });
+        }
+        try { db.prepare('UPDATE contacts SET updated_at = ? WHERE id = ?').run(now(), contact.id); } catch (e) {}
+      }
+    }
+  } catch (e) {
+    console.error('[twilio] voice-status handler error:', e.message);
+  }
+  res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
 });
 
 /**
