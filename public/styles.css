@@ -589,8 +589,7 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
 .dash .grow{ display:grid; gap:16px; margin-bottom:16px; }
 .dash .grow:last-child{ margin-bottom:0; }
 .dash .grow3{ grid-template-columns:repeat(3,1fr); }
-.dash .grow-fn{ grid-template-columns:1.5fr 1fr; }
-@media(max-width:1100px){ .dash .grow3,.dash .grow-fn{ grid-template-columns:1fr; } }
+@media(max-width:1100px){ .dash .grow3{ grid-template-columns:1fr; } }
 .gcard{ background:#fff; border:1px solid #e6e9f0; border-radius:14px; box-shadow:0 1px 2px rgba(16,24,40,.05); overflow:hidden; }
 .gcard-h{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 18px; border-bottom:1px solid #eef0f4; }
 .gcard-h h3{ margin:0; font-size:16px; color:#243043; font-weight:700; letter-spacing:0; }
@@ -600,7 +599,11 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
 .gsplit{ display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
 .gchart{ flex:0 0 auto; text-align:center; }
 .glegs{ flex:1 1 160px; display:flex; flex-direction:column; gap:10px; min-width:150px; }
-.glegs-scroll{ max-height:220px; overflow-y:auto; }
+/* Wide static legend: all rows visible (no internal scroll), laid out across
+   the card width in multiple columns. Collapses to fewer columns on narrow screens. */
+.glegs-wide{ display:grid; grid-template-columns:repeat(3,minmax(180px,1fr)); gap:10px 28px; align-content:start; }
+@media(max-width:1100px){ .glegs-wide{ grid-template-columns:repeat(2,minmax(160px,1fr)); } }
+@media(max-width:640px){ .glegs-wide{ grid-template-columns:1fr; } }
 .gleg{ display:flex; align-items:center; gap:8px; font-size:13px; color:#344054; }
 .gsw{ width:12px; height:12px; border-radius:3px; flex:0 0 auto; }
 .glab{ color:#475467; }

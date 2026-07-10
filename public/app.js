@@ -1050,9 +1050,10 @@ function renderDashboard() {
     distLegs += legLine(RED_SHADES[i % RED_SHADES.length], s, money(valByStage[s]) + ' (' + pct.toFixed(2) + '%) - ' + cnt);
   });
   distLegs += legLine('#fecdd3', 'Lost/abandoned', money(deadVal) + ' (' + (totalDeals ? (dead.length / totalDeals * 100).toFixed(2) : '0.00') + '%) - ' + dead.length);
-  const distBody = '<div class="gsplit"><div class="gchart">' + donutSVG(distSegs, totalDeals) + '</div><div class="glegs glegs-scroll">' + distLegs + '</div></div>';
+  const distBody = '<div class="gsplit"><div class="gchart">' + donutSVG(distSegs, totalDeals) + '</div><div class="glegs glegs-wide">' + distLegs + '</div></div>';
 
-  html += '<div class="grow grow-fn">' + gcard('Funnel', funBody, 'gcard-wide') + gcard('Stage distribution', distBody) + '</div>';
+  html += '<div class="grow">' + gcard('Funnel', funBody, 'gcard-wide') + '</div>';
+  html += '<div class="grow">' + gcard('Stage distribution', distBody) + '</div>';
 
   // ---- Row 3: Tasks (single list, GHL style)
   const sortedTasks = openTasks.slice().sort(function (a, b) {
