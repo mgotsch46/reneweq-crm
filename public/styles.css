@@ -532,6 +532,9 @@ body{ padding-top:env(safe-area-inset-top); padding-bottom:env(safe-area-inset-b
   /* Filters + search stack full-width */
   .filterbar{ flex-direction:column; align-items:stretch; }
   .filterbar .search, .filterbar select{ width:100%; }
+  /* In a vertical column, `flex:1 1 240px` makes the search's 240px basis a
+     VERTICAL height (and grow to fill) — reset it to natural height. */
+  .filterbar .search.big{ flex:0 0 auto; max-width:none; height:auto; }
 
   /* Modal takes the whole screen */
   .overlay{ padding:0; }
