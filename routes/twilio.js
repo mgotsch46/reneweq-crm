@@ -226,19 +226,33 @@ async function listAccountNumbers() {
   for (let i = 0; i < 10 && pageUrl; i++) {
     const j = await twilioRest('GET', pageUrl);
     (j.incoming_phone_numbers || []).forEach(function (n) {
-      out.push({ sid: n.sid, phoneNumber: n.phone_number, friendlyName: n.friendly_name });
+      out.push({
+        sid: n.sid, phoneNumber: n.phone_number, friendlyName: n.friendly_name,
+        capabilities: n.capabilities || null,
+        voiceUrl: n.voice_url || null, voiceApplicationSid: n.voice_application_sid || null,
+        voiceMethod: n.voice_method || null, smsUrl: n.sms_url || null,
+        addressRequirements: n.address_requirements || null,
+        emergencyStatus: n.emergency_status || null, status: n.status || null,
+      });
     });
     pageUrl = j.next_page_uri ? j.next_page_uri.replace('/2010-04-01/Accounts/' + ACCOUNT_SID(), '') : null;
   }
   return out;
 }
 
-/** Point a number's SMS + Voice webhooks at this CRM (so replies route in). */
+/** Point a number's SMS + Voice webhooks at this CRM (so replies route in).
+ *  IMPORTANT: also clears any Voice/SMS *TwiML Application* binding on the
+ *  number. When a number is bound to a Voice Application SID, Twilio uses the
+ *  application's URL and IGNORES VoiceUrl — so inbound calls never reach our
+ *  /voice-inbound handler (they'd run the outbound TwiML app instead and fail
+ *  with "the call cannot be completed"). Sending empty Application SIDs
+ *  detaches the app so our webhook URLs take effect. */
 async function configureNumberWebhooks(numberSid) {
   const base = appBaseUrl();
   return twilioRest('POST', '/IncomingPhoneNumbers/' + numberSid + '.json', {
     SmsUrl: base + '/api/twilio/sms-inbound', SmsMethod: 'POST',
     VoiceUrl: base + '/api/twilio/voice-inbound', VoiceMethod: 'POST',
+    VoiceApplicationSid: '', SmsApplicationSid: '',
   });
 }
 
@@ -372,6 +386,10 @@ router.get('/numbers', requireAuth, async (req, res) => {
         sid: n.sid, phoneNumber: n.phoneNumber, friendlyName: n.friendlyName,
         claimedBy: owner ? { id: owner.id, name: owner.name } : null,
         mine: !!(owner && owner.id === req.user.id),
+        capabilities: n.capabilities, voiceUrl: n.voiceUrl,
+        voiceApplicationSid: n.voiceApplicationSid, voiceMethod: n.voiceMethod,
+        smsUrl: n.smsUrl, addressRequirements: n.addressRequirements,
+        emergencyStatus: n.emergencyStatus, status: n.status,
       };
     });
     let myNumber = null;
