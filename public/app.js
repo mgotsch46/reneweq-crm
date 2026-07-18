@@ -101,6 +101,13 @@ function esc(v) {
 }
 function escAttr(v) { return esc(v); }
 
+/* Generic display clip: collapse whitespace and cap length so a stray blob in
+   any text field (name, etc.) can never blow up a card. */
+function clip(v, n) {
+  const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n).trim() + '…' : s;
+}
+
 /* Display safety-net: never render a wall of text as an "address". If a value
    is unexpectedly long (a stray listing blob), pull the leading street address
    or fall back to a short, ellipsized snippet. */
@@ -1357,7 +1364,7 @@ function renderPipelineList() {
         return '<option value="' + escAttr(s) + '"' + ((c.stage || STAGES[0]) === s ? ' selected' : '') + '>' + esc(s) + '</option>';
       }).join('');
       const fee = pipelineFee(c);
-      const sub = [c.name || '', fee ? pipelineMoney(fee) : '', (c.imported_at || c.created_at) ? 'Added ' + fmtDate(c.imported_at || c.created_at) : '']
+      const sub = [clip(c.name, 60), fee ? pipelineMoney(fee) : '', (c.imported_at || c.created_at) ? 'Added ' + fmtDate(c.imported_at || c.created_at) : '']
         .filter(Boolean).join(' · ');
       rows += '<div class="pl-row" data-id="' + escAttr(c.id) + '">' +
         '<div class="info" data-open="' + escAttr(c.id) + '">' +
@@ -1783,7 +1790,7 @@ function renderContactTable(list) {
     html += '<tr class="rowlink" data-id="' + escAttr(c.id) + '">' +
       '<td class="chk"><input type="checkbox" class="rowchk" data-stop="1" data-chk="' + escAttr(c.id) + '"' +
       (state.selected[idStr] ? ' checked' : '') + '></td>' +
-      '<td>' + esc(c.name || '(no name)') + tags + unreadChip(c.id) + '</td>' +
+      '<td>' + esc(clip(c.name, 60) || '(no name)') + tags + unreadChip(c.id) + '</td>' +
       '<td>' + (leadStatusBadge(c) || '<span class="hint">—</span>') +
       (truthy(c.status_locked) ? ' <span class="tag warn" title="Keep as NEW — status is pinned">📌</span>' : '') + '</td>' +
       '<td>' + (gradeBadge(c) || '<span class="hint">—</span>') + '</td>' +
@@ -1967,7 +1974,7 @@ function openContactModal(contact, leadDraft) {
   const canRvm = !truthy(c.dnc) && truthy(c.consent_rvm);
 
   let html = '<div class="overlay" id="contactOverlay"><div class="modal">' +
-    '<div class="mhead"><div class="mhead-titles"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
+    '<div class="mhead"><div class="mhead-titles"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(clip(c.name, 80) || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
     (c.property ? '<div class="mhead-sub"><span class="mhs-ico">▢</span> ' + esc(shortAddr(c.property)) + '</div>' : '') +
     '</div>' +
     '<button class="close" id="cmClose" title="Close">&times;</button>' +
