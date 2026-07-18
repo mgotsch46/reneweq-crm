@@ -143,6 +143,65 @@ function str(v) {
   return s === '' ? null : s;
 }
 
+// A street suffix alternation reused by the address helpers below.
+const STREET_SUFFIX =
+  'st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|' +
+  'cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|' +
+  'sq|square|loop|run|pass|path|row|walk|xing|crossing|pt|point|byp|bypass';
+
+/**
+ * Pull a clean street address out of a value that may be an entire scraped
+ * listing blob (Zillow "contact agent" text). Returns the tidy address, or the
+ * input unchanged when it already looks like a plain address.
+ */
+function extractCleanAddress(raw) {
+  const s = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!s) return '';
+  // Looks like a plain address already (short, no listing-blob markers).
+  if (s.length <= 80 && !/\b(beds?|baths?|sqft|zestimate|days on zillow|listed by)\b/i.test(s)) {
+    return s;
+  }
+  // 1) Zillow contact boilerplate: "…interested in <ADDRESS>. Next…"
+  let m = s.match(/interested in\s+(.+?)\s*\.\s*(?:Next\b|By pressing|$)/i);
+  if (m && m[1]) return m[1].trim();
+  // 2) "<street address> Street view"
+  m = s.match(new RegExp('([0-9]{1,6}[^,]*?\\b(?:' + STREET_SUFFIX + ')\\b\\.?)\\s+Street view', 'i'));
+  if (m && m[1]) return m[1].trim();
+  // 3) First street-address-looking token anywhere in the text.
+  m = s.match(new RegExp('\\b([0-9]{1,6}\\s+[A-Za-z0-9.\\s]*?\\b(?:' + STREET_SUFFIX + ')\\b\\.?)', 'i'));
+  if (m && m[1]) return m[1].trim();
+  // 4) Give up gracefully: first 60 chars so a card never shows a wall of text.
+  return s.slice(0, 60).trim();
+}
+
+/** Normalized address (lowercase, alphanumerics + single spaces). */
+function normAddr(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * A duplicate-matching key: the leading "<number> <street> <suffix>" portion of
+ * an address, ignoring city/state/zip. Lets "14227 Glenfield St" and
+ * "14227 Glenfield St, Detroit, MI 48213" match as the same property.
+ */
+function addrKey(s) {
+  const t = normAddr(s);
+  if (!t) return '';
+  const m = t.match(new RegExp('^(\\d+\\s+[a-z0-9 ]*?\\b(?:' + STREET_SUFFIX + '))\\b'));
+  return m ? m[1] : t;
+}
+
+/**
+ * Merge helper: keep the NEW value only when it actually carries data;
+ * otherwise preserve the EXISTING value. Guarantees an import can never blank
+ * out data that's already on a lead.
+ */
+function keepNew(nv, ov) {
+  if (nv === undefined || nv === null) return ov;
+  if (typeof nv === 'string' && nv.trim() === '') return ov;
+  return nv;
+}
+
 /** Map one CSV data row (per the normalized header row) to a lead object. */
 function mapRow(headers, cells) {
   const raw = {};
@@ -152,7 +211,11 @@ function mapRow(headers, cells) {
   });
 
   const lead = {};
-  lead.property = str(raw.property);
+  // The address column sometimes arrives as an entire scraped listing blob;
+  // keep a clean street address here and stash the blob for the description.
+  const rawProperty = str(raw.property);
+  lead.property = rawProperty ? extractCleanAddress(rawProperty) : null;
+  lead._propertyBlob = (rawProperty && lead.property !== rawProperty) ? rawProperty : null;
   lead.city = str(raw.city);
   lead.state = str(raw.state);
   lead.zip = str(raw.zip);
@@ -181,7 +244,7 @@ function mapRow(headers, cells) {
     const zm = lead.sourceUrl.match(/(\d+)_zpid/);
     if (zm) lead.zpid = zm[1];
   }
-  lead.listingDescription = str(raw.listingDescription);
+  lead.listingDescription = str(raw.listingDescription) || lead._propertyBlob || null;
   lead.importDate = str(raw.importDate);
   lead.dateFound = str(raw.dateFound);
 
@@ -218,6 +281,11 @@ const CHANGE_FIELDS = [
   ['beds', 'Beds'],
   ['baths', 'Baths'],
   ['sqft', 'Sqft'],
+  ['property', 'Address'],
+  ['city', 'City'],
+  ['state', 'State'],
+  ['zip', 'Zip'],
+  ['propertyType', 'Property Type'],
 ];
 
 const NUMERIC_CHANGE_FIELDS = ['price', 'daysOnMarket', 'beds', 'baths', 'sqft'];
@@ -390,6 +458,14 @@ async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
   const touched = []; // lead ids inserted or updated this run
 
   const runBatch = db.transaction(() => {
+    // Normalized-address index (built once) so a duplicate matches even when the
+    // new file's address format differs from what's stored (street-only vs full).
+    const byKey = new Map();
+    for (const c of db.prepare('SELECT * FROM contacts WHERE owner_id = ?').all(ownerId)) {
+      const k = addrKey(c.property);
+      if (k && !byKey.has(k)) byKey.set(k, c);
+    }
+
     for (let r = 1; r < table.length; r++) {
       try {
         const lead = mapRow(headers, table[r]);
@@ -398,38 +474,73 @@ async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
           continue;
         }
 
-        // Dedupe within this owner: zpid preferred, then property address.
+        // Dedupe within this owner: zpid preferred, then exact address, then a
+        // normalized street-address key (ignores city/state/zip differences).
         let existing = null;
         if (lead.zpid) existing = findByZpid.get({ owner_id: ownerId, zpid: lead.zpid });
         if (!existing && lead.property) {
           existing = findByProperty.get({ owner_id: ownerId, property: lead.property });
         }
+        if (!existing && lead.property) {
+          const k = addrKey(lead.property);
+          if (k && byKey.has(k)) existing = byKey.get(k);
+        }
 
-        const { grade } = computeGrade(lead); // price-drop detection included
         const ts = now();
 
         if (existing) {
-          const changes = diffLead(existing, lead);
+          // MERGE — never blank existing data; only apply values the new row
+          // actually provides. The original is preserved either way; genuine
+          // changes are recorded in the activity log below.
+          const merged = {
+            property: keepNew(lead.property, existing.property),
+            zillow: keepNew(lead.zillow, existing.zillow),
+            city: keepNew(lead.city, existing.city),
+            state: keepNew(lead.state, existing.state),
+            zip: keepNew(lead.zip, existing.zip),
+            price: keepNew(lead.price, existing.price),
+            beds: keepNew(lead.beds, existing.beds),
+            baths: keepNew(lead.baths, existing.baths),
+            sqft: keepNew(lead.sqft, existing.sqft),
+            propertyType: keepNew(lead.propertyType, existing.propertyType),
+            daysOnMarket: keepNew(lead.daysOnMarket, existing.daysOnMarket),
+            listingDate: keepNew(lead.listingDate, existing.listingDate),
+            agentName: keepNew(lead.agentName, existing.agentName),
+            agentPhone: keepNew(lead.agentPhone, existing.agentPhone),
+            agentEmail: keepNew(lead.agentEmail, existing.agentEmail),
+            agentCompany: keepNew(lead.agentCompany, existing.agentCompany),
+            keywords: keepNew(lead.keywords, existing.keywords),
+            sourceUrl: keepNew(lead.sourceUrl, existing.sourceUrl),
+            zpid: keepNew(lead.zpid, existing.zpid),
+            priceChanges: keepNew(lead.priceChanges, existing.priceChanges),
+            importDate: keepNew(lead.importDate, existing.importDate),
+            dateFound: keepNew(lead.dateFound, existing.dateFound),
+            // FSBO flag and stage/notes/name are never changed by a re-import.
+            isFsbo: existing.isFsbo,
+          };
+          // Compare the MERGED result against what's stored, so the log reflects
+          // exactly what actually changed (and blank→kept never shows up).
+          const changes = diffLead(existing, merged);
           if (changes.length === 0) {
-            unchanged++; // nothing changed: do NOT touch the lead at all
+            unchanged++; // nothing new: do NOT touch the lead at all
             continue;
           }
+          const { grade } = computeGrade(Object.assign({}, existing, lead, merged));
           const changeLog = (existing.change_log ? existing.change_log + '\n' : '') + changes.join('\n');
           updateLead.run({
             id: existing.id,
-            property: lead.property || existing.property,
-            zillow: lead.zillow || existing.zillow,
-            city: lead.city, state: lead.state, zip: lead.zip,
-            price: lead.price, beds: lead.beds, baths: lead.baths, sqft: lead.sqft,
-            propertyType: lead.propertyType, daysOnMarket: lead.daysOnMarket,
-            listingDate: lead.listingDate,
-            agentName: lead.agentName, agentPhone: lead.agentPhone,
-            agentEmail: lead.agentEmail, agentCompany: lead.agentCompany,
-            isFsbo: lead.isFsbo,
-            keywords: lead.keywords, sourceUrl: lead.sourceUrl,
-            zpid: lead.zpid || existing.zpid,
-            priceChanges: lead.priceChanges,
-            importDate: lead.importDate, dateFound: lead.dateFound,
+            property: merged.property, zillow: merged.zillow,
+            city: merged.city, state: merged.state, zip: merged.zip,
+            price: merged.price, beds: merged.beds, baths: merged.baths, sqft: merged.sqft,
+            propertyType: merged.propertyType, daysOnMarket: merged.daysOnMarket,
+            listingDate: merged.listingDate,
+            agentName: merged.agentName, agentPhone: merged.agentPhone,
+            agentEmail: merged.agentEmail, agentCompany: merged.agentCompany,
+            isFsbo: merged.isFsbo,
+            keywords: merged.keywords, sourceUrl: merged.sourceUrl,
+            zpid: merged.zpid,
+            priceChanges: merged.priceChanges,
+            importDate: merged.importDate, dateFound: merged.dateFound,
             grade,
             updated_from_sheet_at: ts,
             change_log: changeLog,
@@ -445,8 +556,12 @@ async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
           });
           updated++;
           touched.push(existing.id);
+          // Refresh the index so a later row for the same property merges too.
+          const uk = addrKey(merged.property);
+          if (uk) byKey.set(uk, db.prepare('SELECT * FROM contacts WHERE id = ?').get(existing.id));
         } else {
           const id = uid();
+          const { grade } = computeGrade(lead); // price-drop detection included
           insertLead.run({
             id,
             owner_id: ownerId,
@@ -477,6 +592,10 @@ async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
           });
           inserted++;
           touched.push(id);
+          // Add the brand-new lead to the index so duplicates later in the same
+          // file merge into it instead of creating another copy.
+          const nk = addrKey(lead.property);
+          if (nk && !byKey.has(nk)) byKey.set(nk, db.prepare('SELECT * FROM contacts WHERE id = ?').get(id));
         }
       } catch (e) {
         errors.push('Row ' + (r + 1) + ': ' + (e && e.message ? e.message : String(e)));
