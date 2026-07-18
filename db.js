@@ -579,6 +579,40 @@ try { db.exec('UPDATE contacts SET wholesale_fee = 5000 WHERE wholesale_fee IS N
 }
 
 // ---------------------------------------------------------------------------
+// Companion cleanup: the same bad imports also dropped the whole listing blob
+// into the `name` field (which the pipeline + contact cards display). Replace a
+// blob name with the listing agent's name when we can find one, else "Unknown".
+// Idempotent: a tidy name no longer matches the blob test.
+// ---------------------------------------------------------------------------
+{
+  const looksBlobName = (s) =>
+    s && (String(s).length > 80 ||
+      /\b(beds?|baths?|sqft|zestimate|listed by|get pre-qualified|days on zillow)\b/i.test(String(s)));
+  const agentFromBlob = (s) => {
+    const m = String(s || '').match(
+      /Listed by:\s*([A-Za-z][A-Za-z.'’-]*(?:\s+[A-Za-z.'’-]+){0,3}?)\s+\(?\d{3}\)?[-.\s]?\d{3}/i);
+    return m ? m[1].trim().replace(/\s+/g, ' ') : null;
+  };
+  try {
+    const rows = db.prepare('SELECT id, name, agentName, listingDescription FROM contacts').all();
+    const upd = db.prepare('UPDATE contacts SET name = ? WHERE id = ?');
+    let fixed = 0;
+    const tx = db.transaction(() => {
+      for (const row of rows) {
+        if (!looksBlobName(row.name)) continue;
+        const nm =
+          (row.agentName && !looksBlobName(row.agentName) ? row.agentName : null) ||
+          agentFromBlob(row.name) || agentFromBlob(row.listingDescription) || 'Unknown';
+        upd.run(nm, row.id);
+        fixed++;
+      }
+    });
+    tx();
+    if (fixed) console.log('[db] cleaned ' + fixed + ' blob name(s)');
+  } catch (e) { console.error('[db] name cleanup failed:', e.message); }
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent migration — per-user security & account columns.
 //   password_enc          — AES-encrypted copy of the password so an admin can
 //                           reveal it (per product decision). Login still uses
