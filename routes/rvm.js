@@ -241,6 +241,21 @@ router.post('/activities/:id/read', requireAuth, (req, res) => {
   res.json({ ok: true, read });
 });
 
+/** POST /api/contacts/:id/read-all — mark every unread inbound call/text/
+ *  voicemail for one contact as viewed (used by the pipeline + contact cards). */
+router.post('/contacts/:id/read-all', requireAuth, (req, res) => {
+  const c = db.prepare('SELECT owner_id FROM contacts WHERE id = ?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Contact not found' });
+  if (!isAdmin(req.user) && String(c.owner_id) !== String(req.user.id)) {
+    return res.status(404).json({ error: 'Contact not found' });
+  }
+  const info = db.prepare(
+    "UPDATE activities SET read_at = ? WHERE contact_id = ? AND direction = 'inbound'" +
+    " AND type IN ('sms','rvm','call') AND read_at IS NULL"
+  ).run(now(), req.params.id);
+  res.json({ ok: true, marked: info.changes });
+});
+
 function streamRec(r, res) {
   const file = path.join(RVM_DIR, r.stored);
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'Audio missing on server' });
