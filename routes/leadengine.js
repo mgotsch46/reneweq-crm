@@ -230,7 +230,14 @@ function mapRow(headers, cells) {
   lead.daysOnMarket = dom;
 
   lead.listingDate = str(raw.listingDate);
-  lead.agentName = str(raw.agentName);
+  // Guard: never let a scraped listing blob land in the agent/name fields.
+  let agentNm = str(raw.agentName);
+  if (agentNm && (agentNm.length > 80 ||
+      /\b(beds?|baths?|sqft|zestimate|listed by|get pre-qualified|days on zillow)\b/i.test(agentNm))) {
+    const am = agentNm.match(/Listed by:\s*([A-Za-z][A-Za-z.'’-]*(?:\s+[A-Za-z.'’-]+){0,3}?)\s+\(?\d{3}\)?[-.\s]?\d{3}/i);
+    agentNm = am ? am[1].trim().replace(/\s+/g, ' ') : null;
+  }
+  lead.agentName = agentNm;
   lead.agentPhone = str(raw.agentPhone);
   lead.agentEmail = str(raw.agentEmail);
   lead.agentCompany = str(raw.agentCompany);
