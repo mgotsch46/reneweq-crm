@@ -3975,8 +3975,14 @@ async function fileToCsvText(file) {
     await loadScriptOnce('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    return XLSX.utils.sheet_to_csv(ws);
+    // Pick the sheet/tab with the most rows so data on a second tab isn't missed.
+    let best = '', bestRows = -1;
+    (wb.SheetNames || []).forEach(function (nm) {
+      const csv = XLSX.utils.sheet_to_csv(wb.Sheets[nm]);
+      const rowCount = (csv.match(/\n/g) || []).length;
+      if (rowCount > bestRows) { bestRows = rowCount; best = csv; }
+    });
+    return best;
   }
   return await file.text();
 }
@@ -4038,7 +4044,40 @@ function renderLeadEngine() {
     'Re-imports keep your stage, notes, owner and opened/called flags, and log every sheet change to the lead\u2019s Import change history.</p>' +
     '</div>';
 
+  html += '<div class="panelbox" style="margin-top:18px">' +
+    '<h3>Sync &amp; upload history</h3>' +
+    '<p class="hint" style="margin:6px 0 10px">Every RUN Sync and file/paste import \u2014 newest first \u2014 with who ran it and how many properties were added vs. updated.</p>' +
+    '<div id="leHistory"><span class="hint">Loading\u2026</span></div>' +
+    '</div>';
+
   root.innerHTML = html;
+
+  async function loadSyncHistory() {
+    const el = $('#leHistory');
+    if (!el) return;
+    try {
+      const r = await api('GET', '/leadengine/history') || {};
+      const items = r.items || [];
+      if (!items.length) { el.innerHTML = '<span class="hint">No syncs yet.</span>'; return; }
+      const cell = function (v) { return (v === null || v === undefined) ? '\u2014' : esc(v); };
+      el.innerHTML = '<div class="tablewrap"><table><thead><tr>' +
+        '<th>When</th><th>User</th><th>Source</th><th>New</th><th>Updated</th><th>Unchanged</th><th>Rows</th><th>Errors</th>' +
+        '</tr></thead><tbody>' +
+        items.map(function (h) {
+          return '<tr>' +
+            '<td>' + esc(fmtTimestamp(h.created_at)) + '</td>' +
+            '<td>' + cell(h.user_name) + '</td>' +
+            '<td>' + cell(h.source) + '</td>' +
+            '<td>' + cell(h.inserted) + '</td>' +
+            '<td>' + cell(h.updated) + '</td>' +
+            '<td>' + cell(h.unchanged) + '</td>' +
+            '<td>' + cell(h.total) + '</td>' +
+            '<td>' + (h.error_count ? '<span class="tag warn">' + esc(h.error_count) + '</span>' : '0') + '</td>' +
+            '</tr>';
+        }).join('') + '</tbody></table></div>';
+    } catch (e) { el.innerHTML = '<span class="hint">Could not load history.</span>'; }
+  }
+  loadSyncHistory();
 
   function setResult(msg, isErr) {
     const el = $('#leResult');
@@ -4090,6 +4129,7 @@ function renderLeadEngine() {
       setResult(msg, false);
       await refreshContacts().catch(function () {});
       loadLeSettings();
+      try { loadSyncHistory(); } catch (e) {}
       toast('Lead Engine sync complete', 'ok');
     } catch (e) {
       setResult(e && e.message ? e.message : String(e), true);
