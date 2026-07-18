@@ -533,6 +533,52 @@ try { db.exec('UPDATE contacts SET wholesale_fee = 5000 WHERE wholesale_fee IS N
 }
 
 // ---------------------------------------------------------------------------
+// One-time cleanup: some leads were imported with an entire scraped Zillow
+// listing dumped into the `property` (address) field, which made pipeline cards
+// and contact pages show a wall of text — and broke duplicate matching. Pull a
+// clean street address out of each blob and move the full text into
+// listingDescription (only when it's empty). Idempotent: once `property` is a
+// tidy address it no longer matches the blob test, so re-runs are no-ops.
+// ---------------------------------------------------------------------------
+{
+  const STREET_SUFFIX =
+    'st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|' +
+    'cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|' +
+    'sq|square|loop|run|pass|path|row|walk|xing|crossing|pt|point|byp|bypass';
+  const looksLikeBlob = (s) =>
+    s && (s.length > 80 || /\b(beds?|baths?|sqft|zestimate|listed by|days on zillow)\b/i.test(s));
+  const cleanAddr = (raw) => {
+    const s = String(raw || '').trim().replace(/\s+/g, ' ');
+    if (!s) return '';
+    let m = s.match(/interested in\s+(.+?)\s*\.\s*(?:Next\b|By pressing|$)/i);
+    if (m && m[1]) return m[1].trim();
+    m = s.match(new RegExp('([0-9]{1,6}[^,]*?\\b(?:' + STREET_SUFFIX + ')\\b\\.?)\\s+Street view', 'i'));
+    if (m && m[1]) return m[1].trim();
+    m = s.match(new RegExp('\\b([0-9]{1,6}\\s+[A-Za-z0-9.\\s]*?\\b(?:' + STREET_SUFFIX + ')\\b\\.?)', 'i'));
+    if (m && m[1]) return m[1].trim();
+    return s.slice(0, 60).trim();
+  };
+  try {
+    const rows = db.prepare('SELECT id, property, listingDescription FROM contacts').all();
+    const upd = db.prepare('UPDATE contacts SET property = ?, listingDescription = ? WHERE id = ?');
+    let fixed = 0;
+    const tx = db.transaction(() => {
+      for (const row of rows) {
+        const prop = row.property || '';
+        if (!looksLikeBlob(prop)) continue;
+        const clean = cleanAddr(prop);
+        if (!clean || clean === prop) continue;
+        const desc = (row.listingDescription && String(row.listingDescription).trim()) ? row.listingDescription : prop;
+        upd.run(clean, desc, row.id);
+        fixed++;
+      }
+    });
+    tx();
+    if (fixed) console.log('[db] cleaned ' + fixed + ' blob address(es) into tidy street addresses');
+  } catch (e) { console.error('[db] address cleanup failed:', e.message); }
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent migration — per-user security & account columns.
 //   password_enc          — AES-encrypted copy of the password so an admin can
 //                           reveal it (per product decision). Login still uses
