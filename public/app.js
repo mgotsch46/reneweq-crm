@@ -101,6 +101,19 @@ function esc(v) {
 }
 function escAttr(v) { return esc(v); }
 
+/* Display safety-net: never render a wall of text as an "address". If a value
+   is unexpectedly long (a stray listing blob), pull the leading street address
+   or fall back to a short, ellipsized snippet. */
+function shortAddr(v) {
+  const s = String(v == null ? '' : v).trim().replace(/\s+/g, ' ');
+  if (s.length <= 80) return s;
+  const suf = 'st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail';
+  let m = s.match(/interested in\s+(.+?)\s*\.\s*(?:Next\b|By pressing|$)/i);
+  if (!m) m = s.match(new RegExp('\\b([0-9]{1,6}\\s+[A-Za-z0-9.\\s]*?\\b(?:' + suf + ')\\b\\.?)', 'i'));
+  if (m && m[1]) return m[1].trim();
+  return s.slice(0, 70).trim() + '…';
+}
+
 /* Parse a value that may already be an array or a JSON string. */
 function parseArr(v, fallback) {
   if (Array.isArray(v)) return v.slice();
@@ -124,6 +137,39 @@ function getTextStatus(c) {
   return a.slice(0, 4).map(Boolean);
 }
 function truthy(v) { return v === true || v === 1 || v === '1' || v === 'true'; }
+
+/* How many unread inbound calls/texts/voicemails a contact has (from the
+   /inbox/unread snapshot kept in state._vmUnread). Drives the "N new" chips on
+   the pipeline + contact cards and the "Mark viewed" action. */
+function contactUnread(cid) {
+  const items = (state && state._vmUnread) || [];
+  let n = 0;
+  for (const it of items) { if (String(it.contact_id) === String(cid)) n++; }
+  return n;
+}
+
+/* Mark every unread call/text/voicemail for a contact as viewed, then refresh
+   the badges and whatever list is showing. */
+async function markContactViewed(cid) {
+  try {
+    await api('POST', '/contacts/' + encodeURIComponent(cid) + '/read-all');
+    if (state._vmUnread) state._vmUnread = state._vmUnread.filter(function (it) { return String(it.contact_id) !== String(cid); });
+    try { await refreshVoicemailBadge(); } catch (e) {}
+    if (state.tab === 'pipeline') renderPipelineList();
+    else renderContacts();
+    if (state.openContactId === cid) loadActivities(cid);
+    toast('Marked as viewed', 'ok');
+  } catch (e) { toastErr(e); }
+}
+
+/* Small clickable "N new" chip for cards; clicking marks the contact viewed. */
+function unreadChip(cid) {
+  const n = contactUnread(cid);
+  if (!n) return '';
+  return ' <button class="tag warn unread-chip" data-stop="1" data-markviewed="' + escAttr(cid) +
+    '" title="' + n + ' unread call' + (n === 1 ? '' : 's') + '/text' + (n === 1 ? '' : 's') +
+    ' — click to mark viewed">' + n + ' new</button>';
+}
 
 function debounce(fn, ms) {
   let timer = null;
@@ -1315,7 +1361,7 @@ function renderPipelineList() {
         .filter(Boolean).join(' · ');
       rows += '<div class="pl-row" data-id="' + escAttr(c.id) + '">' +
         '<div class="info" data-open="' + escAttr(c.id) + '">' +
-        '<div class="addr">' + gradeBadge(c) + esc(c.property || '(no address)') + '</div>' +
+        '<div class="addr">' + gradeBadge(c) + esc(shortAddr(c.property) || '(no address)') + unreadChip(c.id) + '</div>' +
         '<div class="sub">' + esc(sub) + '</div></div>' +
         '<select class="search" data-move="' + escAttr(c.id) + '" title="Change status">' + opts + '</select>' +
         '</div>';
@@ -1327,6 +1373,12 @@ function renderPipelineList() {
     el.addEventListener('click', function () {
       const c = state.contacts.find(function (x) { return String(x.id) === String(el.getAttribute('data-open')); });
       if (c) openContactModal(c);
+    });
+  });
+  $all('[data-markviewed]', box).forEach(function (b) {
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      markContactViewed(b.getAttribute('data-markviewed'));
     });
   });
   const clr = $('#plClear');
@@ -1420,7 +1472,7 @@ function pipelineCardHtml(c) {
   const added = c.imported_at || c.created_at;
   const dateLine = added ? '<div class="pdate">📅 Added ' + esc(fmtDate(added)) + '</div>' : '';
   return '<div class="pcard" draggable="true" data-id="' + escAttr(c.id) + '">' +
-    '<div class="nm">' + gradeBadge(c) + esc(c.property || '(no address)') + '</div>' +
+    '<div class="nm">' + gradeBadge(c) + esc(shortAddr(c.property) || '(no address)') + '</div>' +
     '<div class="pr">' + esc(c.name || '') + '</div>' +
     dateLine +
     (meta ? '<div class="meta">' + meta + '</div>' : '') +
@@ -1731,11 +1783,11 @@ function renderContactTable(list) {
     html += '<tr class="rowlink" data-id="' + escAttr(c.id) + '">' +
       '<td class="chk"><input type="checkbox" class="rowchk" data-stop="1" data-chk="' + escAttr(c.id) + '"' +
       (state.selected[idStr] ? ' checked' : '') + '></td>' +
-      '<td>' + esc(c.name || '(no name)') + tags + '</td>' +
+      '<td>' + esc(c.name || '(no name)') + tags + unreadChip(c.id) + '</td>' +
       '<td>' + (leadStatusBadge(c) || '<span class="hint">—</span>') +
       (truthy(c.status_locked) ? ' <span class="tag warn" title="Keep as NEW — status is pinned">📌</span>' : '') + '</td>' +
       '<td>' + (gradeBadge(c) || '<span class="hint">—</span>') + '</td>' +
-      '<td>' + esc(c.property || '') + '</td>' +
+      '<td>' + esc(shortAddr(c.property) || '') + '</td>' +
       '<td>' + esc(c.city || '') + '</td>' +
       '<td>' + esc(c.state || '') + '</td>' +
       '<td>' + phoneCellHtml(c) + '</td>' +
@@ -1756,6 +1808,14 @@ function renderContactTable(list) {
       if (state.sort && state.sort.key === key) state.sort.dir = -state.sort.dir;
       else state.sort = { key: key, dir: 1 };
       renderContactTable(list);
+    });
+  });
+
+  // "N new" chips: mark a contact's unread calls/texts viewed from the row.
+  $all('[data-markviewed]', box).forEach(function (b) {
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      markContactViewed(b.getAttribute('data-markviewed'));
     });
   });
 
@@ -1908,7 +1968,7 @@ function openContactModal(contact, leadDraft) {
 
   let html = '<div class="overlay" id="contactOverlay"><div class="modal">' +
     '<div class="mhead"><div class="mhead-titles"><h3>' + (isNew ? (isLead ? 'New Lead (review & save)' : 'New Contact') : esc(c.name || 'Contact') + ' ' + gradeBadge(c) + leadStatusBadge(c)) + '</h3>' +
-    (c.property ? '<div class="mhead-sub"><span class="mhs-ico">▢</span> ' + esc(c.property) + '</div>' : '') +
+    (c.property ? '<div class="mhead-sub"><span class="mhs-ico">▢</span> ' + esc(shortAddr(c.property)) + '</div>' : '') +
     '</div>' +
     '<button class="close" id="cmClose" title="Close">&times;</button>' +
     '</div>' +

@@ -369,6 +369,8 @@ select.inline option{background:var(--panel);color:var(--text)}
 
 /* ---------- Leads ---------- */
 .tag.lead{background:rgba(168,85,247,.15);color:#d8b4fe;border-color:rgba(168,85,247,.35)}
+button.unread-chip{cursor:pointer;font:inherit;font-size:11px;line-height:1.2;font-weight:600}
+button.unread-chip:hover{filter:brightness(1.15)}
 .filterbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
 .filterbar .search{min-width:220px;flex:1}
 .filterbar .search.sm{min-width:100px;max-width:150px;flex:0 1 auto}
