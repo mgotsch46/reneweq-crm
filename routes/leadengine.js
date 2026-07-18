@@ -394,6 +394,32 @@ const insertNoteActivity = db.prepare(`
   VALUES (@id, @contact_id, @owner_id, 'note', 'automated', 'outbound', @body, 'ok', @created_by, @created_at)
 `);
 
+// Sync history — one row per import run, so the Lead Engine can show who
+// uploaded what, when, and how many properties were added/updated.
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_history (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT,
+    user_id TEXT,
+    user_name TEXT,
+    source TEXT,
+    inserted INTEGER,
+    updated INTEGER,
+    unchanged INTEGER,
+    queued INTEGER,
+    total INTEGER,
+    error_count INTEGER,
+    created_at TEXT
+  )`);
+} catch (e) { console.error('[leadengine] sync_history table:', e.message); }
+
+const insertSyncHistory = db.prepare(`
+  INSERT INTO sync_history
+    (id, owner_id, user_id, user_name, source, inserted, updated, unchanged, queued, total, error_count, created_at)
+  VALUES
+    (@id, @owner_id, @user_id, @user_name, @source, @inserted, @updated, @unchanged, @queued, @total, @error_count, @created_at)
+`);
+
 // --------------------------- Core sync -------------------------------------
 
 /** Error helper carrying an HTTP status for the route handler. */
@@ -417,7 +443,7 @@ function httpError(status, message) {
  *   - After the row loop the queue is aged: still-NEW leads that were NOT
  *     touched this run and were never opened/called become 'IN QUEUE'.
  */
-async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
+async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag, userId, userName, source }) {
   if (!ownerId) throw httpError(400, 'No import owner available');
 
   // CSV text comes from the user's sheet URL or pasted text — never scraped.
@@ -631,6 +657,17 @@ async function syncFromCsv({ csvText, csvUrl, ownerId, sourceTag }) {
   setSetting('last_import_counts', JSON.stringify({
     inserted, updated, unchanged, queued, total: result.total, errorCount: errors.length,
   }));
+  // Record this run in the sync history (never let logging break the import).
+  try {
+    insertSyncHistory.run({
+      id: uid(), owner_id: ownerId,
+      user_id: userId || null,
+      user_name: userName || 'Auto-import',
+      source: source || (csvUrl ? 'Google Sheet' : 'File / paste'),
+      inserted, updated, unchanged, queued, total: result.total,
+      error_count: errors.length, created_at: now(),
+    });
+  } catch (e) { console.error('[leadengine] sync_history insert:', e.message); }
   return result;
 }
 
@@ -661,12 +698,29 @@ router.post('/sync', async (req, res) => {
   }
 
   try {
-    const out = await syncFromCsv({ csvText: body.csvText, csvUrl: body.csvUrl, ownerId });
+    const out = await syncFromCsv({
+      csvText: body.csvText, csvUrl: body.csvUrl, ownerId,
+      userId: req.user.id, userName: req.user.name || req.user.email || 'User',
+      source: body.csvUrl ? 'Google Sheet (RUN Sync)' : 'File / paste upload',
+    });
     res.json(out);
   } catch (e) {
     res.status(e.statusCode || 500).json({
       error: (e.statusCode ? '' : 'Sync failed: ') + (e && e.message ? e.message : String(e)),
     });
+  }
+});
+
+/** GET /api/leadengine/history — recent sync runs (admin sees all; a user sees
+ *  their own). Powers the "Sync history" table in the Lead Engine view. */
+router.get('/history', (req, res) => {
+  try {
+    const rows = isAdmin(req.user)
+      ? db.prepare('SELECT * FROM sync_history ORDER BY created_at DESC LIMIT 100').all()
+      : db.prepare('SELECT * FROM sync_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 100').all(req.user.id);
+    res.json({ items: rows });
+  } catch (e) {
+    res.json({ items: [] });
   }
 });
 
