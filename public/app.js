@@ -1116,7 +1116,7 @@ function renderDashboard() {
     const c = (state.contacts || []).find(function (x) { return String(x.id) === String(t.contact_id); });
     const who = c ? (c.name || c.property || '') : '';
     return '<div class="gtask"><input type="checkbox" disabled>' +
-      '<div class="gtask-b"><div class="gtask-t">' + esc(t.title || 'Task') + ' ' + taskDuePill(t.due_date) + '</div>' +
+      '<div class="gtask-b"><div class="gtask-t">' + esc(clip(t.title, 80) || 'Task') + ' ' + taskDuePill(t.due_date) + '</div>' +
       '<div class="gtask-s">' + (who ? esc(who) + ' &nbsp; ' : '') + 'Assigned to: ' + esc(taskOwnerName(t)) + '</div></div></div>';
   };
   const tasksBody = sortedTasks.length ? sortedTasks.map(taskRow).join('') : '<p class="ghint">No pending tasks. 🎉</p>';
@@ -1949,7 +1949,7 @@ async function pushImportantDatesToCalendar(before, after, contactId, property) 
     ['dueDiligence', 'Due Diligence'],
     ['inspectionExpires', 'Inspection Expires'],
   ];
-  const addr = property ? ' — ' + property : '';
+  const addr = property ? ' — ' + shortAddr(property) : '';
   for (var i = 0; i < fields.length; i++) {
     const key = fields[i][0], label = fields[i][1];
     const v = after[key];
@@ -3231,7 +3231,7 @@ function taskItemHtml(t) {
   }
   return '<div class="taskitem' + (isDone ? ' done' : '') + '" data-id="' + escAttr(t.id) + '">' +
     '<input type="checkbox"' + (isDone ? ' checked' : '') + ' title="Toggle done">' +
-    '<span class="tt">' + esc(t.title || '') +
+    '<span class="tt">' + esc(clip(t.title, 100) || '') +
     (t.ownerName ? ' <span class="tag grey" title="Assigned to">' + esc(t.ownerName) + '</span>' : '') +
     '</span>' +
     (contact ? '<button class="linklike" data-contact-link="' + escAttr(contact.id) + '">' + esc(contact.name || 'contact') + '</button>' : '') +
