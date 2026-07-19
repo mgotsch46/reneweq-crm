@@ -202,6 +202,22 @@ function keepNew(nv, ov) {
   return nv;
 }
 
+/**
+ * Pull just the meaningful listing remarks out of a full scraped Zillow page.
+ * Keeps the "What's special" blurb (the real description) and drops the rest
+ * (stats, similar homes, legal footer). Plain, short descriptions pass through.
+ */
+function extractRemarks(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  const m = s.match(/What'?s special\s+(.+?)\s+(?:\d[\d,]*\s+days? on Zillow|days on Zillow|Zillow last checked|Listing updated|Listed by:|Facts & features|Show more)/i);
+  if (m && m[1]) return m[1].trim();
+  // Already a normal, human-sized description — leave it alone.
+  if (s.length <= 600 && !/\b(zestimate|days on zillow|get pre-qualified|what'?s special)\b/i.test(s)) return s;
+  // Couldn't isolate remarks from a big blob — trim so it isn't a wall of text.
+  return s.slice(0, 400).trim() + '…';
+}
+
 /** Map one CSV data row (per the normalized header row) to a lead object. */
 function mapRow(headers, cells) {
   const raw = {};
@@ -251,7 +267,7 @@ function mapRow(headers, cells) {
     const zm = lead.sourceUrl.match(/(\d+)_zpid/);
     if (zm) lead.zpid = zm[1];
   }
-  lead.listingDescription = str(raw.listingDescription) || lead._propertyBlob || null;
+  lead.listingDescription = extractRemarks(str(raw.listingDescription) || lead._propertyBlob) || null;
   lead.importDate = str(raw.importDate);
   lead.dateFound = str(raw.dateFound);
 
