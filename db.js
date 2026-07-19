@@ -646,6 +646,39 @@ try { db.exec('UPDATE contacts SET wholesale_fee = 5000 WHERE wholesale_fee IS N
 }
 
 // ---------------------------------------------------------------------------
+// When the address blob was pulled out earlier, the full scraped listing text
+// was parked in listingDescription so nothing was lost. Trim those to just the
+// real "What's special" remarks and drop the page junk. Idempotent.
+// ---------------------------------------------------------------------------
+{
+  const extractRemarks = (raw) => {
+    const s = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    const m = s.match(/What'?s special\s+(.+?)\s+(?:\d[\d,]*\s+days? on Zillow|days on Zillow|Zillow last checked|Listing updated|Listed by:|Facts & features|Show more)/i);
+    if (m && m[1]) return m[1].trim();
+    if (s.length <= 600 && !/\b(zestimate|days on zillow|get pre-qualified|what'?s special)\b/i.test(s)) return s;
+    return s.slice(0, 400).trim() + '…';
+  };
+  const isBlobDesc = (s) =>
+    s && (String(s).length > 600 ||
+      /\b(zestimate|days on zillow|get pre-qualified|what'?s special)\b/i.test(String(s)));
+  try {
+    const rows = db.prepare('SELECT id, listingDescription FROM contacts WHERE listingDescription IS NOT NULL').all();
+    const upd = db.prepare('UPDATE contacts SET listingDescription = ? WHERE id = ?');
+    let fixed = 0;
+    const tx = db.transaction(() => {
+      for (const row of rows) {
+        if (!isBlobDesc(row.listingDescription)) continue;
+        const clean = extractRemarks(row.listingDescription);
+        if (clean && clean !== row.listingDescription) { upd.run(clean, row.id); fixed++; }
+      }
+    });
+    tx();
+    if (fixed) console.log('[db] trimmed ' + fixed + ' listing-description blob(s)');
+  } catch (e) { console.error('[db] listing description cleanup failed:', e.message); }
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent migration — per-user security & account columns.
 //   password_enc          — AES-encrypted copy of the password so an admin can
 //                           reveal it (per product decision). Login still uses
