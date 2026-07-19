@@ -613,6 +613,39 @@ try { db.exec('UPDATE contacts SET wholesale_fee = 5000 WHERE wholesale_fee IS N
 }
 
 // ---------------------------------------------------------------------------
+// The Important-Date reminders (Due Diligence / Inspection Expires / Closing…)
+// are auto-created as tasks titled "<Label> — <property address>". Ones created
+// while a contact's address was still a blob captured the whole listing text.
+// Rebuild those titles as "<Label> — <clean address>". Idempotent.
+// ---------------------------------------------------------------------------
+{
+  const looksBlobTitle = (s) =>
+    s && (String(s).length > 80 ||
+      /\b(beds?|baths?|sqft|zestimate|listed by|get pre-qualified|days on zillow)\b/i.test(String(s)));
+  try {
+    const rows = db.prepare('SELECT id, title, contact_id FROM tasks').all();
+    const getProp = db.prepare('SELECT property FROM contacts WHERE id = ?');
+    const upd = db.prepare('UPDATE tasks SET title = ? WHERE id = ?');
+    let fixed = 0;
+    const tx = db.transaction(() => {
+      for (const row of rows) {
+        if (!looksBlobTitle(row.title)) continue;
+        const label = String(row.title).split('—')[0].trim().slice(0, 60) || 'Reminder';
+        let prop = '';
+        if (row.contact_id) {
+          const c = getProp.get(row.contact_id);
+          if (c && c.property && !looksBlobTitle(c.property)) prop = c.property;
+        }
+        upd.run(prop ? (label + ' — ' + prop) : label, row.id);
+        fixed++;
+      }
+    });
+    tx();
+    if (fixed) console.log('[db] cleaned ' + fixed + ' blob task title(s)');
+  } catch (e) { console.error('[db] task title cleanup failed:', e.message); }
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent migration — per-user security & account columns.
 //   password_enc          — AES-encrypted copy of the password so an admin can
 //                           reveal it (per product decision). Login still uses
