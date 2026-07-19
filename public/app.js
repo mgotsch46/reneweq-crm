@@ -3388,11 +3388,17 @@ async function loadDocuments(contactId, overlay) {
         '<span class="docname" title="' + escAttr(d.filename) + '">📄 ' + esc(d.filename) + '</span>' +
         '<span class="docmeta">' + esc(fmtBytes(d.size)) + ' &middot; ' + esc(fmtTimestamp(d.created_at)) + '</span>' +
         '<span class="docacts">' +
+        '<button class="btn ghost small" data-view="' + escAttr(d.id) + '" data-name="' + escAttr(d.filename) + '">View</button>' +
         '<button class="btn ghost small" data-dl="' + escAttr(d.id) + '" data-name="' + escAttr(d.filename) + '">Download</button>' +
         '<button class="btn ghost small danger" data-del="' + escAttr(d.id) + '">Delete</button>' +
         '</span></div>';
     }).join('');
 
+    $all('[data-view]', box).forEach(function (b) {
+      b.addEventListener('click', function () {
+        viewDocument(b.getAttribute('data-view'), b.getAttribute('data-name'), b);
+      });
+    });
     $all('[data-dl]', box).forEach(function (b) {
       b.addEventListener('click', function () {
         downloadDocument(b.getAttribute('data-dl'), b.getAttribute('data-name'), b);
@@ -3435,6 +3441,58 @@ async function downloadDocument(docId, filename, btn) {
     toastErr(e);
   }
   if (btn) btn.disabled = false;
+}
+
+/** View a document in-app (PDF/image) — auth header → blob → viewer overlay.
+ *  Non-viewable types (docx, xlsx…) fall back to a download. */
+async function viewDocument(docId, filename, btn) {
+  if (btn) btn.disabled = true;
+  const ext = String(filename || '').split('.').pop().toLowerCase();
+  const viewable = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', txt: 'text/plain' };
+  if (!viewable[ext]) {
+    // Can't render this type in the browser — just download it.
+    if (btn) btn.disabled = false;
+    return downloadDocument(docId, filename, btn);
+  }
+  try {
+    const res = await fetch('/api/documents/' + encodeURIComponent(docId) + '/download', {
+      headers: state.token ? { Authorization: 'Bearer ' + state.token } : {},
+    });
+    if (!res.ok) throw new Error('Could not open (' + res.status + ')');
+    let blob = await res.blob();
+    // Force a viewable MIME type so the browser renders instead of downloading.
+    if (blob.type !== viewable[ext]) blob = new Blob([blob], { type: viewable[ext] });
+    const url = URL.createObjectURL(blob);
+    openDocViewer(url, filename, ext);
+  } catch (e) {
+    toastErr(e);
+  }
+  if (btn) btn.disabled = false;
+}
+
+/** Full-screen overlay that renders a PDF (iframe) or image (img). */
+function openDocViewer(url, filename, ext) {
+  const isImg = ['png', 'jpg', 'jpeg', 'gif', 'webp'].indexOf(ext) !== -1;
+  const inner = isImg
+    ? '<img src="' + url + '" alt="' + escAttr(filename) + '" style="max-width:100%;max-height:100%;margin:auto;display:block">'
+    : '<iframe src="' + url + '" title="' + escAttr(filename) + '" style="width:100%;height:100%;border:0;background:#fff"></iframe>';
+  const ov = document.createElement('div');
+  ov.className = 'overlay docviewer';
+  ov.innerHTML =
+    '<div class="docviewer-box">' +
+    '<div class="docviewer-head">' +
+    '<span class="docviewer-title" title="' + escAttr(filename) + '">📄 ' + esc(filename || 'Document') + '</span>' +
+    '<a class="btn ghost small" href="' + url + '" target="_blank" rel="noopener noreferrer">Open in new tab</a>' +
+    '<button class="btn ghost small" data-dvclose="1">Close</button>' +
+    '</div>' +
+    '<div class="docviewer-body">' + inner + '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const close = function () { try { URL.revokeObjectURL(url); } catch (e) {} ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = function (e) { if (e.key === 'Escape') close(); };
+  ov.querySelector('[data-dvclose]').addEventListener('click', close);
+  ov.addEventListener('click', function (e) { if (e.target === ov) close(); });
+  document.addEventListener('keydown', onKey);
 }
 
 /* ------------------------- Ringless Voicemail (RVM) ------------------------- */
