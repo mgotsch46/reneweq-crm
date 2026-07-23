@@ -301,8 +301,63 @@
     }
   }
 
+
+  /* ------------------------------------------------ dialer (New call keypad) */
+  var dialerEl;
+  function buildDialer() {
+    if (dialerEl) return;
+    dialerEl = document.createElement('div');
+    dialerEl.className = 'dialer-bg';
+    var keys = [['1',''],['2','ABC'],['3','DEF'],['4','GHI'],['5','JKL'],['6','MNO'],['7','PQRS'],['8','TUV'],['9','WXYZ'],['*',''],['0','+'],['#','']];
+    dialerEl.innerHTML = '<div class="dialer"><div class="mgrip"></div>' +
+      '<div class="dmatch" id="dMatch"></div><div class="dnum" id="dNum"></div>' +
+      '<div class="dkeys">' + keys.map(function (k) { return '<button class="dkey" data-k="' + k[0] + '">' + k[0] + '<small>' + k[1] + '</small></button>'; }).join('') + '</div>' +
+      '<div class="dialer-actions"><button class="dclose" data-dclose>Close</button>' +
+      '<button class="dcall" data-dcall>' + IC.phone + '</button>' +
+      '<button class="dback" data-dback>&#9003;</button></div></div>';
+    document.body.appendChild(dialerEl);
+    var num = '';
+    function fmt(s) {
+      var d = s.replace(/[^0-9]/g, '');
+      if (/^\d{10}$/.test(d)) return '(' + d.slice(0,3) + ') ' + d.slice(3,6) + '-' + d.slice(6);
+      if (/^1\d{10}$/.test(d)) return '+1 (' + d.slice(1,4) + ') ' + d.slice(4,7) + '-' + d.slice(7);
+      return s;
+    }
+    function upd() {
+      document.getElementById('dNum').textContent = fmt(num);
+      var lead = null; try { lead = (typeof findContactByNumberLocal === 'function') ? findContactByNumberLocal(num) : null; } catch (e) {}
+      document.getElementById('dMatch').textContent = lead ? (lead.name || '') : '';
+    }
+    dialerEl.addEventListener('click', function (e) {
+      var k = e.target.closest('[data-k]');
+      if (k) { num += k.getAttribute('data-k'); upd(); return; }
+      if (e.target.closest('[data-dback]')) { num = num.slice(0, -1); upd(); return; }
+      if (e.target.closest('[data-dclose]') || e.target === dialerEl) { closeDialer(); return; }
+      if (e.target.closest('[data-dcall]')) {
+        var raw = num.replace(/[^0-9*#+]/g, ''); if (!raw) return;
+        var lead = null; try { lead = (typeof findContactByNumberLocal === 'function') ? findContactByNumberLocal(raw) : null; } catch (e) {}
+        try { placeCall(raw, lead ? lead.id : null, lead ? (lead.name || raw) : raw); } catch (e) {}
+        closeDialer();
+      }
+    });
+    dialerEl._reset = function () { num = ''; upd(); };
+  }
+  function openDialer() { buildDialer(); dialerEl._reset(); dialerEl.classList.add('open'); }
+  function closeDialer() { if (dialerEl) dialerEl.classList.remove('open'); }
+  function installDialerIntercept() {
+    // Capture-phase so we replace the app's default "New call" modal with the keypad on mobile.
+    document.addEventListener('click', function (e) {
+      if (!isMobile()) return;
+      if (e.target.closest && e.target.closest('#convNewCall')) {
+        e.preventDefault(); e.stopPropagation(); openDialer();
+      }
+    }, true);
+  }
+
   function init() {
     buildNav();
+    buildDialer();
+    installDialerIntercept();
     watch();
     afterRender();
     // Nudge after initial data loads settle.

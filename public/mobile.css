@@ -5,7 +5,7 @@
  * ========================================================================== */
 
 /* Bottom nav + More sheet are hidden by default (desktop) */
-.mnav, .msheet-bg { display: none; }
+.mnav, .msheet-bg, .dialer-bg { display: none; }
 
 @media (max-width: 720px) {
 
@@ -70,12 +70,10 @@
   .mtab .mti svg { width: 24px; height: 24px; }
   .mtab .mtl { font-size: 10px; font-weight: 700; }
   .mtab.on { color: var(--accent); }
-  .mtab.center .mti {
-    width: 46px; height: 46px; margin-top: -14px; border-radius: 15px; color: #fff;
-    background: linear-gradient(135deg,#ff4b3a,#d10000); box-shadow: 0 8px 18px rgba(214,40,40,.4);
-  }
-  .mtab.center.on .mti { color: #fff; }
-  .mtab.center .mtl { color: var(--accent); }
+  /* Contacts is a normal tab now — only the ACTIVE tab is highlighted red */
+  .mtab.center .mti { width: 26px; height: 26px; margin-top: 0; border-radius: 0;
+    background: none; box-shadow: none; color: inherit; }
+  .mtab.center .mtl { color: inherit; }
   .mtab .mnb {
     position: absolute; top: 0; right: calc(50% - 22px);
     background: #dc2626; color: #fff; font-size: 9px; font-weight: 800;
@@ -226,5 +224,61 @@
   .btn.ghost { background:#fff !important; color:var(--text) !important; border:1px solid var(--line) !important; box-shadow:var(--shadow) !important; }
   .btn.danger { background:#dc2626 !important; }
   .btn.blue { background: linear-gradient(135deg,#3b82f6,#1d4ed8) !important; border-color:transparent !important; color:#fff !important; }
+
+
+  /* ---------------------- Info banners readable on light (Lead Engine etc.) ---------------------- */
+  .banner { background:#eef4ff !important; border:1px solid #cddcff !important; color:#22344f !important; line-height:1.55; }
+  .banner b, .banner code { color:#0f2440; background:transparent; }
+  .status-badge.ls-new { background:#fef3c7 !important; color:#92400e !important; border-color:#fcd34d !important; }
+  .status-badge.ls-queue { background:#e0edff !important; color:#1d4ed8 !important; border-color:#bcd4ff !important; }
+  .status-badge.ls-working { background:#eef1f6 !important; color:#475467 !important; border-color:#e0e4ec !important; }
+
+  /* ---------------------- Settings: full-width, no horizontal overflow ---------------------- */
+  #view-settings .panelbox, #view-settings .sec, #view-settings .adminbar,
+  #view-settings .banner, #view-settings > * { max-width:100% !important; width:100% !important; }
+  #view-settings .panelbox { padding:16px; }
+  #view-settings .grid2, #view-settings .grid3 { grid-template-columns:1fr !important; }
+  #view-settings input, #view-settings select, #view-settings textarea { max-width:100% !important; width:100% !important; }
+  /* Turn wide settings tables into stacked rows (kills sideways scrolling) */
+  #view-settings table { min-width:0 !important; width:100% !important; }
+  #view-settings table thead { display:none; }
+  #view-settings table tr { display:block; border:1px solid var(--line); border-radius:12px;
+    margin-bottom:8px; padding:4px 2px; background:#fff; }
+  #view-settings table td { display:flex; justify-content:space-between; gap:12px; text-align:right;
+    border:none !important; padding:7px 12px; color:var(--text); }
+  #view-settings table td .btn { white-space:nowrap; }
+
+  /* ---------------------- Inbox: single-column, app-like ---------------------- */
+  #view-conversations .conv { height: calc(100vh - 168px); min-height:0; }
+  #view-conversations .conv-body { flex-direction: column; }
+  #view-conversations .conv-list { flex:0 0 auto; width:100% !important; max-height:42vh;
+    border-right:none; border-bottom:1px solid var(--line); }
+  #view-conversations .conv-detail { width:100%; }
+  #view-conversations .conv-h { flex-wrap:wrap; gap:8px; }
+  #view-conversations .conv-actions { width:100%; display:flex; gap:8px; }
+  #view-conversations .conv-actions .gpill { flex:1; text-align:center; padding:11px 8px; font-size:13px; font-weight:700; }
+  #view-conversations .conv-item { padding:14px; }
+  #view-conversations .conv-av { width:42px; height:42px; flex-basis:42px; }
+
+  /* ---------------------- Dialer (New call keypad) ---------------------- */
+  .dialer-bg { position:fixed; inset:0; z-index:120; background:rgba(19,23,34,.5); display:none; align-items:flex-end; }
+  .dialer-bg.open { display:flex; animation:mfade .2s ease; }
+  .dialer { width:100%; background:var(--bg); border-radius:26px 26px 0 0;
+    padding:12px 20px calc(18px + env(safe-area-inset-bottom)); box-shadow:0 -10px 40px rgba(19,23,34,.3); animation:mup .28s ease; }
+  .dialer .mgrip { width:42px; height:5px; border-radius:3px; background:#cfd5e0; margin:4px auto 8px; }
+  .dialer .dmatch { text-align:center; font-size:13px; font-weight:800; color:var(--accent); min-height:18px; }
+  .dialer .dnum { text-align:center; font-size:30px; font-weight:700; letter-spacing:.01em; min-height:42px;
+    color:var(--text); word-break:break-all; padding:2px 0 8px; }
+  .dkeys { display:grid; grid-template-columns:repeat(3,1fr); gap:11px; margin:0 0 14px; }
+  .dkey { background:#fff; border:none; border-radius:16px; padding:13px 0; font-size:24px; font-weight:700;
+    color:var(--text); box-shadow:var(--shadow); line-height:1; }
+  .dkey small { display:block; font-size:9px; font-weight:800; color:var(--muted); letter-spacing:.14em; margin-top:2px; height:11px; }
+  .dialer-actions { display:flex; align-items:center; justify-content:center; gap:26px; }
+  .dcall { width:64px; height:64px; border-radius:50%; border:none; background:#10b981; color:#fff;
+    display:flex; align-items:center; justify-content:center; box-shadow:0 10px 22px rgba(16,185,129,.4); }
+  .dcall svg { width:28px; height:28px; }
+  .dback, .dclose { min-width:60px; height:52px; border-radius:16px; border:none; background:#fff; color:var(--muted);
+    box-shadow:var(--shadow); font-size:15px; font-weight:700; }
+  .dback { font-size:22px; }
 
 }
