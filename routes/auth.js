@@ -22,33 +22,11 @@ function loginSuccess(user) {
   };
 }
 
-/** POST /api/auth/register {name,email,password} → {token,user} */
+/** POST /api/auth/register — DISABLED. Accounts are created by an admin only
+ *  (see routes/users.js + the Team tab). Public self-sign-up is turned off so a
+ *  free app download is unusable without a login the admin issues. */
 router.post('/register', (req, res) => {
-  const { name, email, password } = req.body || {};
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'name, email and password are required' });
-  }
-  const normEmail = String(email).trim().toLowerCase();
-  const exists = db.prepare('SELECT id FROM users WHERE email = ?').get(normEmail);
-  if (exists) return res.status(409).json({ error: 'Email already registered' });
-
-  const user = {
-    id: uid(),
-    name: String(name).trim(),
-    email: normEmail,
-    password_hash: bcrypt.hashSync(String(password), 10),
-    password_enc: encryptSecret(String(password)),
-    role: 'user', // registrations are always plain users
-    business_number: null,
-    active: 1,
-    created_at: now(),
-  };
-  db.prepare(`
-    INSERT INTO users (id, name, email, password_hash, password_enc, role, business_number, active, created_at)
-    VALUES (@id, @name, @email, @password_hash, @password_enc, @role, @business_number, @active, @created_at)
-  `).run(user);
-
-  res.status(201).json(loginSuccess(user));
+  return res.status(403).json({ error: 'Sign-up is disabled. Please ask your administrator for a login.' });
 });
 
 /**
