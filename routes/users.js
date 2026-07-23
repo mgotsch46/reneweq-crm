@@ -60,10 +60,11 @@ router.post('/', (req, res) => {
     business_number: (req.body || {}).business_number || null,
     active: 1,
     created_at: now(),
+    must_change_password: 1, // new users must set their own password on first login
   };
   db.prepare(`
-    INSERT INTO users (id, name, email, password_hash, password_enc, role, business_number, active, created_at)
-    VALUES (@id, @name, @email, @password_hash, @password_enc, @role, @business_number, @active, @created_at)
+    INSERT INTO users (id, name, email, password_hash, password_enc, role, business_number, active, created_at, must_change_password)
+    VALUES (@id, @name, @email, @password_hash, @password_enc, @role, @business_number, @active, @created_at, @must_change_password)
   `).run(user);
 
   const { password_hash, password_enc, ...pub } = user; // never return the hash

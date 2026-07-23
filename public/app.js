@@ -291,7 +291,43 @@ async function finishLogin(out) {
   setSession(out.token, out.user);
   $('#authPassword').value = '';
   const code = $('#twofaCode'); if (code) code.value = '';
+  if (out && out.user && truthy(out.user.must_change_password)) { promptPasswordChange(); return; }
   await bootApp();
+}
+
+/** Force an admin-created user to choose their own password before entering. */
+function promptPasswordChange() {
+  var old = document.getElementById('pwChangeOverlay'); if (old) old.remove();
+  var wrap = document.createElement('div');
+  wrap.id = 'pwChangeOverlay';
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(4,8,22,.6)';
+  wrap.innerHTML =
+    '<div class="card" style="max-width:400px;width:100%">' +
+    '<h1 style="margin:0 0 4px;font-size:20px;font-weight:800">Set your password</h1>' +
+    '<p class="sub" style="margin:0 0 16px">Welcome! For your security, choose your own password to finish setting up your account.</p>' +
+    '<div class="field"><label>New password</label><input id="pwNew" type="password" autocomplete="new-password" placeholder="At least 6 characters"></div>' +
+    '<div class="field"><label>Confirm password</label><input id="pwConfirm" type="password" autocomplete="new-password" placeholder="Re-enter password"></div>' +
+    '<button id="pwSave" class="btn wide">Save & continue</button>' +
+    '<div class="err" id="pwErr"></div></div>';
+  document.body.appendChild(wrap);
+  var save = document.getElementById('pwSave');
+  async function submit() {
+    var np = document.getElementById('pwNew').value || '';
+    var cp = document.getElementById('pwConfirm').value || '';
+    var err = document.getElementById('pwErr'); err.textContent = '';
+    if (np.length < 6) { err.textContent = 'Password must be at least 6 characters.'; return; }
+    if (np !== cp) { err.textContent = 'Passwords do not match.'; return; }
+    save.disabled = true;
+    try {
+      var out = await api('POST', '/auth/change-password', { password: np });
+      if (out && out.user) { state.user = out.user; try { localStorage.setItem('crm_user', JSON.stringify(out.user)); } catch (e) {} }
+      wrap.remove();
+      await bootApp();
+    } catch (e) { err.textContent = e.message; save.disabled = false; }
+  }
+  save.addEventListener('click', submit);
+  document.getElementById('pwConfirm').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+  setTimeout(function () { var f = document.getElementById('pwNew'); if (f) f.focus(); }, 60);
 }
 
 /** Swap the login card into "enter your 2FA code" mode. */

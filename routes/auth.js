@@ -8,7 +8,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const speakeasy = require('speakeasy');
 const { db, uid, now, encryptSecret } = require('../db');
-const { signToken, publicUser, JWT_SECRET } = require('../auth');
+const { signToken, publicUser, JWT_SECRET, requireAuth } = require('../auth');
 
 const router = express.Router();
 
@@ -82,6 +82,22 @@ router.post('/login/2fa', (req, res) => {
   if (!ok) return res.status(401).json({ error: 'That 2FA code is not valid' });
 
   res.json(loginSuccess(user));
+});
+
+/** POST /api/auth/change-password {password} — set a new password for the
+ *  logged-in user (used for the forced first-login change). Clears the
+ *  must_change_password flag so the prompt does not appear again. */
+router.post('/change-password', requireAuth, (req, res) => {
+  const { password } = req.body || {};
+  if (!password || String(password).length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+  const hash = bcrypt.hashSync(String(password), 10);
+  const enc = encryptSecret(String(password));
+  db.prepare('UPDATE users SET password_hash = ?, password_enc = ?, must_change_password = 0 WHERE id = ?')
+    .run(hash, enc, req.user.id);
+  const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  res.json({ user: publicUser(fresh) });
 });
 
 module.exports = router;

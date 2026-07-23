@@ -698,6 +698,7 @@ const USER_SECURITY_COLUMNS = [
   ['vm_greeting_recording_id', 'TEXT'],
   ['timezone', "TEXT NOT NULL DEFAULT 'America/New_York'"], // each user's own tz
   ['sending_number', 'TEXT'], // this user's own Twilio number (E.164) for texts + calls
+  ['must_change_password', 'INTEGER NOT NULL DEFAULT 0'], // force admin-created users to set their own password on first login
 ];
 
 // tasks gain a `reminded` flag so timed-task push reminders only fire once.
